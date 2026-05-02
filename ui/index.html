@@ -312,11 +312,12 @@ body::before {
   height: 100%; width: auto;
   max-width: 200px;
   object-fit: contain;
-  /* Adapta el PNG (fondo blanco + texto negro) al tema oscuro:
-     invert + hue-rotate(180deg) preserva los colores (rojo, beige) y
-     transforma negro→blanco y blanco→negro (que se funde con el fondo). */
-  filter: invert(1) hue-rotate(180deg) brightness(1.05);
-  opacity: 0.9;
+  /* El PNG ya viene con fondo transparente (procesado por _extract_logo.py).
+     El texto del logo es negro y se vería invisible sobre el tema oscuro,
+     así que aplicamos invert(1) hue-rotate(180deg): el negro pasa a blanco
+     y el rojo/beige se preservan (la doble rotación cancela el shift). */
+  filter: invert(1) hue-rotate(180deg) brightness(1.1);
+  opacity: 0.92;
   user-select: none;
   -webkit-user-drag: none;
 }
