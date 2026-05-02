@@ -89,7 +89,7 @@ class Api:
     """
 
     def __init__(self):
-        self.window: webview.Window | None = None
+        self._window: webview.Window | None = None
         self.files: dict[int, FileEntry] = {}
         self._next_id = 1
         self._lock    = threading.Lock()
@@ -97,7 +97,7 @@ class Api:
 
     # ── Setup desde el launcher (no expuesto a JS) ─────────────────────────
     def _attach_window(self, window: webview.Window) -> None:
-        self.window = window
+        self._window = window
 
     # ── Helpers internos ─────────────────────────────────────────────────────
     def _emit(self, kind: str, payload: dict) -> None:
@@ -105,7 +105,7 @@ class Api:
 
         Frontend debe definir `window.__pdfBridge.on<Kind>(payload)`.
         """
-        if self.window is None:
+        if self._window is None:
             return
         method = "on" + kind[:1].upper() + kind[1:]
         try:
@@ -114,7 +114,7 @@ class Api:
                 f"window.__pdfBridge && typeof window.__pdfBridge.{method} === 'function' "
                 f"&& window.__pdfBridge.{method}({data})"
             )
-            self.window.evaluate_js(js)
+            self._window.evaluate_js(js)
         except Exception:
             traceback.print_exc()
 
@@ -138,9 +138,9 @@ class Api:
 
     def pick_files(self) -> list[str]:
         """Abre el diálogo nativo de selección múltiple de PDFs."""
-        if self.window is None:
+        if self._window is None:
             return []
-        result = self.window.create_file_dialog(
+        result = self._window.create_file_dialog(
             webview.OPEN_DIALOG,
             allow_multiple=True,
             file_types=("PDF Files (*.pdf)",),
@@ -293,7 +293,7 @@ class Api:
     def save_one(self, file_id: int) -> dict:
         """Abre el diálogo "Guardar como…" para un archivo y lo copia."""
         entry = self.files.get(int(file_id))
-        if not entry or self.window is None:
+        if not entry or self._window is None:
             return {"saved": False, "error": "Archivo inválido"}
 
         nombre = (entry.name or "").strip()
@@ -302,7 +302,7 @@ class Api:
         if not nombre.lower().endswith(".pdf"):
             nombre += ".pdf"
 
-        result = self.window.create_file_dialog(
+        result = self._window.create_file_dialog(
             webview.SAVE_DIALOG,
             directory=os.path.dirname(entry.path),
             save_filename=nombre,
