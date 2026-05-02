@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PDF Scholar</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet" />
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #root { height: 100%; width: 100%; overflow: hidden; }
+  body {
+    font-family: 'Roboto', sans-serif;
+    background: #0f1218;
+    color: #d4d8e0;
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2e3447; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3e4560; }
+
+  /* Drag resize */
+  .drag-divider {
+    width: 4px;
+    background: #1e2330;
+    cursor: col-resize;
+    flex-shrink: 0;
+    transition: background 0.2s;
+    position: relative;
+    z-index: 5;
+  }
+  .drag-divider:hover, .drag-divider.dragging { background: #b75a3d; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ─── MOCK DATA ────────────────────────────────────────────────────────────────
+const MOCK_PARAMS = ['autores', 'año', 'crossref título', 'tipo', 'heurísticas'];
+
+const MOCK_TEXTS = [
+  `[329]
+Artículo de Reflexión
+Recibido: 24 de agosto de 2024; aprobado: 19 de marzo de 2025.
+DOI: 10.14714/rena.2024.323.133
+Arte y técnica: reflexiones teóricas sobre el arte rupestre como hecho social total en el mundo prehispánico de la cultura Aguada, el caso de la Tunita (Catamarca, Argentina)
+
+El vínculo entre arte y técnica en el arte rupestre prehispánico constituye un campo de análisis complejo y ampliamente debatido. Nuestro objetivo es problematizar la habilidad técnica, evidenciada a través de los trazados cuidadosos de pigmentos...`,
+  `[142]
+Research Article
+Received: March 12, 2024; accepted: November 5, 2024.
+DOI: 10.1016/j.culher.2024.09.021
+Assembling the Niche: The Power of Temporary Gatherings on the North Coast of Peru
+
+This paper examines the role of temporary gatherings in shaping social niches in pre-Columbian coastal societies. Drawing on archaeological evidence from the Moche and Chimu cultures, we analyze how periodic assemblages at monumental sites functioned as mechanisms for political integration and cosmological performance...`,
+  `[87]
+Review Article
+Submitted: January 8, 2025; revised: April 2, 2025.
+Cognitive Approaches to Rock Art Interpretation: Challenges and Perspectives
+
+The cognitive turn in archaeological theory has opened new avenues for understanding prehistoric visual culture. This review synthesizes current approaches to interpreting rock art through frameworks derived from cognitive science, embodied cognition, and evolutionary anthropology...`,
+];
+
+const MOCK_FILES = [
+  {
+    id: 1,
+    originalName: 'doc_garcia_2023_17.pdf',
+    suggestedName: 'Edward K. Dawson (2026) – Assembling the Niche the power of temporary gatherings on the North Coast of Peru',
+    source: 'crossref (doi)',
+    saved: false,
+    textIdx: 1,
+  },
+  {
+    id: 2,
+    originalName: 'Virago+2723_31.pdf',
+    suggestedName: 'Gabriel Acosta et al (2026) – Arte y técnica reflexiones teóricas sobre el arte rupestre como hecho social total en el mundo prehispánico de la cultura Aguada, el caso de la Tunita (Catamarca, Argentina)',
+    source: 'pdf (doi)',
+    saved: false,
+    textIdx: 0,
+  },
+  {
+    id: 3,
+    originalName: 'cognitive_review_2025.pdf',
+    suggestedName: 'Martinez et al (2025) – Cognitive Approaches to Rock Art Interpretation Challenges and Perspectives',
+    source: 'crossref (doi)',
+    saved: true,
+    textIdx: 2,
+  },
+];
+
+const MOCK_LOG_EMPTY = [
+  { type: 'info', text: 'PDF Scholar listo. Sube archivos para comenzar.' },
+  { type: 'info', text: 'Límite: 50 archivos por sesión.' },
+];
+
+const MOCK_LOG_LOADED = [
+  { type: 'info', text: 'Iniciando procesamiento de 2 archivos PDF...' },
+  { type: 'success', text: '✓ garcia_2023_17.pdf → Edward K. Dawson (2026) – Assembling the Niche...' },
+  { type: 'info', text: '  DOI encontrado: 10.1016/j.culher.2024.09.021' },
+  { type: 'info', text: '  Fuente: Crossref (doi)' },
+  { type: 'success', text: '✓ Virago+2723_31.pdf → Gabriel Acosta et al (2026) – Arte y técnica reflexiones teóricas...' },
+  { type: 'info', text: '  DOI encontrado: 10.14714/rena.2024.323.133' },
+  { type: 'info', text: '  Fuente: pdf (doi)' },
+  { type: 'success', text: '✓ Análisis completo. Revisa la cola y guarda.' },
+  { type: 'info', text: 'Cola limpiada.' },
+];
+
+// ─── PALETTE ──────────────────────────────────────────────────────────────────
+const C = {
+  bg: '#0f1218',
+  surface1: '#161b24',
+  surface2: '#1c2230',
+  surface3: '#212840',
+  border: '#252d3e',
+  borderLight: '#2e3850',
+  text: '#d4d8e0',
+  textMuted: '#6b7590',
+  textDim: '#4a5270',
+  accent: '#b75a3d',
+  accentHover: '#c9683a',
+  gold: '#c79a43',
+  goldHover: '#d4a84e',
+  success: '#3da87a',
+  green: '#2de89a',
+};
+
+// ─── PDF THUMBNAIL MOCK ───────────────────────────────────────────────────────
+function PDFThumbnail({ fileIndex }) {
+  if (fileIndex === null || fileIndex === undefined) {
+    return (
+      <div style={{
+        width: '100%', aspectRatio: '0.707',
+        background: C.surface1,
+        border: `1px solid ${C.border}`,
+        borderRadius: 4,
+        display: 'flex', flexDirection: 'column',
+        alignItems: 'center', justifyContent: 'center',
+        gap: 10, color: C.textDim,
+      }}>
+        <svg width="32" height="40" viewBox="0 0 32 40" fill="none">
+          <rect x="1" y="1" width="30" height="38" rx="2" stroke={C.textDim} strokeWidth="1.5"/>
+          <path d="M8 14h16M8 19h16M8 24h10" stroke={C.textDim} strokeWidth="1.2" strokeLinecap="round"/>
+          <path d="M20 1v9h9" stroke={C.textDim} strokeWidth="1.2"/>
+        </svg>
+        <span style={{ fontSize: 11, fontWeight: 300, letterSpacing: '0.03em', textAlign: 'center', padding: '0 16px' }}>
+          Sube un PDF<br/>para ver<br/>la vista previa
+        </span>
+      </div>
+    );
+  }
+  // Simulated PDF page
+  const colors = ['#1a2235', '#1e2535', '#192030'];
+  const bg = colors[fileIndex % colors.length];
+  const lines = [
+    [10, 18, 75], [10, 25, 60], [10, 30, 90], [10, 35, 45],
+    [10, 44, 80], [10, 49, 70], [10, 54, 85], [10, 59, 55],
+    [10, 68, 75], [10, 73, 65], [10, 78, 88], [10, 83, 50],
+    [10, 92, 70], [10, 97, 60], [10, 102, 80],
+  ];
+  return (
+    <div style={{
+      width: '100%', aspectRatio: '0.707',
+      background: '#f5f0e8',
+      border: `1px solid ${C.border}`,
+      borderRadius: 4,
+      overflow: 'hidden',
+      position: 'relative',
+    }}>
+      <svg width="100%" height="100%" viewBox="0 0 210 297" preserveAspectRatio="xMidYMid meet">
+        <rect width="210" height="297" fill="#f5f0e8"/>
+        <text x="105" y="20" textAnchor="middle" fontSize="7" fill="#333" fontFamily="serif" fontWeight="bold">
+          {fileIndex === 1 ? 'Arte rupestre prehispánico' : 'North Coast of Peru'}
+        </text>
+        <text x="105" y="28" textAnchor="middle" fontSize="5" fill="#666" fontFamily="serif">
+          {fileIndex === 1 ? 'Catamarca, Argentina' : 'Edward K. Dawson · 2026'}
+        </text>
+        <line x1="15" y1="32" x2="195" y2="32" stroke="#ccc" strokeWidth="0.5"/>
+        {lines.map(([x, y, w], i) => (
+          <rect key={i} x={x} y={y} width={w} height="2.5" rx="0.5"
+            fill={i % 5 === 0 ? '#444' : i % 7 === 0 ? '#b75a3d' : '#888'}
+            opacity={i % 3 === 0 ? 0.7 : 0.5}/>
+        ))}
+        {fileIndex === 1 && (
+          <rect x="150" y="270" width="40" height="20" fill="#eee" stroke="#ccc" strokeWidth="0.5"/>
+        )}
+      </svg>
+    </div>
+  );
+}
+
+// ─── LOG PANEL ────────────────────────────────────────────────────────────────
+function LogPanel({ logs }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [logs]);
+  return (
+    <div ref={ref} style={{
+      height: '100%', overflowY: 'auto',
+      fontFamily: "'Roboto Mono', 'Courier New', monospace",
+      fontSize: 11.5, lineHeight: 1.6,
+      padding: '8px 12px',
+      color: C.textMuted,
+    }}>
+      {logs.map((l, i) => (
+        <div key={i} style={{
+          color: l.type === 'success' ? C.success : l.type === 'error' ? '#e06060' : C.textMuted,
+          paddingLeft: l.text.startsWith(' ') ? 12 : 0,
+        }}>
+          {l.text}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── PARAM BREADCRUMB ─────────────────────────────────────────────────────────
+function ParamBar({ params }) {
+  return (
+    <div style={{
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: 4,
+      padding: '7px 14px',
+      display: 'flex', alignItems: 'center', gap: 6,
+      flexWrap: 'wrap',
+    }}>
+      {params.map((p, i) => (
+        <React.Fragment key={i}>
+          <span style={{ color: C.gold, fontSize: 12, fontWeight: 400, letterSpacing: '0.02em' }}>{p}</span>
+          {i < params.length - 1 && (
+            <span style={{ color: C.textDim, fontSize: 11 }}>→</span>
+          )}
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
+// ─── FILE ITEM ────────────────────────────────────────────────────────────────
+function FileItem({ file, isSelected, onSelect, onSave, onRemove, onChange }) {
+  const [hovered, setHovered] = useState(false);
+  const saved = file.saved;
+  return (
+    <div
+      onClick={() => onSelect(file.id)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        background: isSelected ? C.surface3 : hovered ? C.surface2 : 'transparent',
+        border: `1px solid ${isSelected ? C.accent : hovered ? C.borderLight : C.border}`,
+        borderRadius: 5,
+        padding: '10px 12px',
+        cursor: 'pointer',
+        transition: 'all 0.15s ease',
+        marginBottom: 6,
+      }}
+    >
+      {/* Original filename */}
+      <div style={{
+        fontSize: 10.5, color: C.textDim, marginBottom: 5,
+        fontWeight: 300, letterSpacing: '0.02em',
+        display: 'flex', alignItems: 'center', gap: 6,
+      }}>
+        <span style={{
+          background: C.surface3, border: `1px solid ${C.border}`,
+          borderRadius: 2, padding: '1px 5px', fontSize: 9,
+          color: C.textMuted, fontFamily: 'monospace',
+        }}>{file.source}</span>
+        <span style={{ color: C.textDim }}>{file.originalName}</span>
+      </div>
+      {/* Editable name */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <input
+          value={file.suggestedName}
+          onChange={e => onChange(file.id, e.target.value)}
+          onClick={e => e.stopPropagation()}
+          style={{
+            flex: 1, background: 'transparent',
+            border: 'none', borderBottom: `1px solid ${isSelected ? C.borderLight : 'transparent'}`,
+            color: C.text, fontSize: 12.5, fontFamily: 'Roboto, sans-serif',
+            fontWeight: 400, padding: '3px 0', outline: 'none',
+            transition: 'border-color 0.15s',
+            textDecoration: saved ? 'none' : 'none',
+            opacity: saved ? 0.65 : 1,
+          }}
+          onFocus={e => { e.target.style.borderBottomColor = C.accent; e.stopPropagation(); }}
+          onBlur={e => e.target.style.borderBottomColor = isSelected ? C.borderLight : 'transparent'}
+        />
+        {!saved && (
+          <button
+            onClick={e => { e.stopPropagation(); onSave(file.id); }}
+            style={{
+              background: C.accent, color: '#fff',
+              border: 'none', borderRadius: 3,
+              padding: '4px 12px', fontSize: 11, fontWeight: 500,
+              fontFamily: 'Roboto, sans-serif',
+              cursor: 'pointer', flexShrink: 0,
+              letterSpacing: '0.04em', transition: 'background 0.15s',
+            }}
+            onMouseEnter={e => e.target.style.background = C.accentHover}
+            onMouseLeave={e => e.target.style.background = C.accent}
+          >
+            Guardar
+          </button>
+        )}
+        {saved && (
+          <span style={{
+            fontSize: 10, color: C.success, fontWeight: 500,
+            letterSpacing: '0.05em', flexShrink: 0,
+          }}>✓ GUARDADO</span>
+        )}
+        <button
+          onClick={e => { e.stopPropagation(); onRemove(file.id); }}
+          style={{
+            background: 'transparent', border: 'none',
+            color: C.textDim, cursor: 'pointer',
+            fontSize: 14, lineHeight: 1, padding: '2px 4px',
+            borderRadius: 3, transition: 'color 0.15s',
+          }}
+          onMouseEnter={e => e.target.style.color = '#e06060'}
+          onMouseLeave={e => e.target.style.color = C.textDim}
+        >×</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── EMPTY STATE ──────────────────────────────────────────────────────────────
+function EmptyState() {
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center',
+      height: '100%', gap: 12, color: C.textDim,
+    }}>
+      <svg width="40" height="48" viewBox="0 0 40 48" fill="none">
+        <rect x="2" y="2" width="36" height="44" rx="3" stroke={C.textDim} strokeWidth="1.5"/>
+        <path d="M10 16h20M10 22h20M10 28h14" stroke={C.textDim} strokeWidth="1.2" strokeLinecap="round"/>
+        <path d="M26 2v12h12" stroke={C.textDim} strokeWidth="1.2"/>
+      </svg>
+      <div style={{ textAlign: 'center', lineHeight: 1.8 }}>
+        <div style={{ fontSize: 13, fontWeight: 400, color: C.textMuted }}>La cola está vacía.</div>
+        <div style={{ fontSize: 11.5, fontWeight: 300, color: C.textDim }}>
+          Haz clic en <span style={{ color: C.gold, fontWeight: 500 }}>Subir PDFs</span> para empezar.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+function App() {
+  const [hasFiles, setHasFiles] = useState(false);
+  const [files, setFiles] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [logs, setLogs] = useState(MOCK_LOG_EMPTY);
+  const [leftWidth, setLeftWidth] = useState(55); // % of center area
+  const [rightWidth, setRightWidth] = useState(220);
+  const [logHeight, setLogHeight] = useState(110);
+  const [activeTab, setActiveTab] = useState('preview'); // 'preview' | 'text'
+  const [pageNum, setPageNum] = useState(1);
+
+  const isDraggingH = useRef(false);
+  const isDraggingV = useRef(false);
+  const isDraggingR = useRef(false);
+  const containerRef = useRef(null);
+
+  const selectedFile = files.find(f => f.id === selectedId) || null;
+
+  // ─── Drag resize logic ─────────────────────────────────────────────────
+  const startDragH = useCallback((e) => {
+    isDraggingH.current = true;
+    e.preventDefault();
+  }, []);
+  const startDragV = useCallback((e) => {
+    isDraggingV.current = true;
+    e.preventDefault();
+  }, []);
+  const startDragR = useCallback((e) => {
+    isDraggingR.current = true;
+    e.preventDefault();
+  }, []);
+
+  useEffect(() => {
+    const onMove = (e) => {
+      const cx = e.clientX || (e.touches && e.touches[0].clientX);
+      const cy = e.clientY || (e.touches && e.touches[0].clientY);
+      if (isDraggingH.current && containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        const totalW = rect.width - (rightWidth + 4);
+        const pct = ((cx - rect.left) / totalW) * 100;
+        setLeftWidth(Math.min(75, Math.max(25, pct)));
+      }
+      if (isDraggingV.current && containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        const fromBottom = rect.bottom - cy;
+        setLogHeight(Math.min(250, Math.max(60, fromBottom)));
+      }
+      if (isDraggingR.current && containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        const fromRight = rect.right - cx;
+        setRightWidth(Math.min(340, Math.max(160, fromRight)));
+      }
+    };
+    const onUp = () => {
+      isDraggingH.current = false;
+      isDraggingV.current = false;
+      isDraggingR.current = false;
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+  }, [rightWidth]);
+
+  // ─── Actions ─────────────────────────────────────────────────────────────
+  const handleUpload = () => {
+    const newFiles = MOCK_FILES.map(f => ({ ...f, saved: false }));
+    setFiles(newFiles);
+    setSelectedId(newFiles[0].id);
+    setHasFiles(true);
+    setLogs(MOCK_LOG_LOADED);
+    setPageNum(1);
+  };
+
+  const handleSaveAll = () => {
+    setFiles(prev => prev.map(f => ({ ...f, saved: true })));
+    setLogs(prev => [...prev, { type: 'success', text: '✓ Todos los archivos guardados.' }]);
+  };
+
+  const handleClear = () => {
+    setFiles([]);
+    setSelectedId(null);
+    setHasFiles(false);
+    setLogs(prev => [...prev, { type: 'info', text: 'Cola limpiada.' }]);
+    setPageNum(1);
+  };
+
+  const handleSave = (id) => {
+    setFiles(prev => prev.map(f => f.id === id ? { ...f, saved: true } : f));
+    const file = files.find(f => f.id === id);
+    setLogs(prev => [...prev, { type: 'success', text: `✓ Guardado: ${file?.suggestedName?.slice(0, 60)}...` }]);
+  };
+
+  const handleRemove = (id) => {
+    const newFiles = files.filter(f => f.id !== id);
+    setFiles(newFiles);
+    if (selectedId === id) setSelectedId(newFiles[0]?.id || null);
+    if (newFiles.length === 0) { setHasFiles(false); setLogs(prev => [...prev, { type: 'info', text: 'Cola limpiada.' }]); }
+  };
+
+  const handleChange = (id, val) => {
+    setFiles(prev => prev.map(f => f.id === id ? { ...f, suggestedName: val, saved: false } : f));
+  };
+
+  const handleSelect = (id) => {
+    setSelectedId(id);
+    setPageNum(1);
+  };
+
+  const savedCount = files.filter(f => f.saved).length;
+  const totalCount = files.length;
+
+  // ─── TWEAKS ────────────────────────────────────────────────────────────
+  const TWEAK_DEFAULS = /*EDITMODE-BEGIN*/{
+    "accentColor": "#b75a3d",
+    "goldColor": "#c79a43",
+    "density": "normal",
+    "logVisible": true
+  }/*EDITMODE-END*/;
+
+  const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULS);
+
+  const accent = tweaks.accentColor;
+  const gold = tweaks.goldColor;
+
+  // ─── LAYOUT SIZES ────────────────────────────────────────────────────────
+  const topBarH = 48;
+  const paramBarH = 38;
+  const statusBarH = 24;
+  const logPanelH = tweaks.logVisible ? logHeight : 0;
+  const mainH = `calc(100vh - ${topBarH + paramBarH + statusBarH + logPanelH + (tweaks.logVisible ? 12 : 4)}px)`;
+
+  return (
+    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: C.bg, overflow: 'hidden', userSelect: 'none' }}>
+
+      {/* ── TOP BAR ── */}
+      <div style={{
+        height: topBarH, flexShrink: 0,
+        background: C.surface1,
+        borderBottom: `1px solid ${C.border}`,
+        display: 'flex', alignItems: 'center',
+        padding: '0 16px', gap: 20,
+      }}>
+        {/* Logo */}
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+          <span style={{
+            fontSize: 18, fontWeight: 700, letterSpacing: '-0.02em',
+            color: C.text,
+          }}>PDF Scholar</span>
+          <div style={{ display: 'flex', gap: 12, marginLeft: 8 }}>
+            {['Archivo', 'Editar', 'Documentos'].map(m => (
+              <span key={m} style={{ fontSize: 11, color: C.textMuted, cursor: 'pointer', fontWeight: 300,
+                letterSpacing: '0.02em', transition: 'color 0.15s' }}
+                onMouseEnter={e => e.target.style.color = C.text}
+                onMouseLeave={e => e.target.style.color = C.textMuted}
+              >{m}</span>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ flex: 1 }} />
+
+        {/* Buttons */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button onClick={handleUpload} style={{
+            background: accent, color: '#fff',
+            border: 'none', borderRadius: 4,
+            padding: '7px 16px', fontSize: 12, fontWeight: 500,
+            fontFamily: 'Roboto, sans-serif',
+            cursor: 'pointer', letterSpacing: '0.04em',
+            transition: 'background 0.15s',
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}
+            onMouseEnter={e => e.currentTarget.style.background = '#c9683a'}
+            onMouseLeave={e => e.currentTarget.style.background = accent}
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M6 1v7M3 4l3-3 3 3M1 10h10" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            Subir PDFs
+          </button>
+
+          <button onClick={handleSaveAll} disabled={!hasFiles} style={{
+            background: 'transparent', color: hasFiles ? C.text : C.textDim,
+            border: `1px solid ${hasFiles ? C.borderLight : C.border}`,
+            borderRadius: 4, padding: '6px 14px', fontSize: 12, fontWeight: 400,
+            fontFamily: 'Roboto, sans-serif',
+            cursor: hasFiles ? 'pointer' : 'default', letterSpacing: '0.02em',
+            transition: 'all 0.15s',
+          }}
+            onMouseEnter={e => hasFiles && (e.currentTarget.style.borderColor = C.textMuted)}
+            onMouseLeave={e => e.currentTarget.style.borderColor = hasFiles ? C.borderLight : C.border}
+          >Guardar todos</button>
+
+          <button onClick={handleClear} disabled={!hasFiles} style={{
+            background: 'transparent', color: hasFiles ? C.textMuted : C.textDim,
+            border: `1px solid ${hasFiles ? C.border : C.border}`,
+            borderRadius: 4, padding: '6px 14px', fontSize: 12, fontWeight: 400,
+            fontFamily: 'Roboto, sans-serif',
+            cursor: hasFiles ? 'pointer' : 'default', letterSpacing: '0.02em',
+            transition: 'all 0.15s',
+          }}
+            onMouseEnter={e => hasFiles && (e.currentTarget.style.color = '#e06060')}
+            onMouseLeave={e => { e.currentTarget.style.color = hasFiles ? C.textMuted : C.textDim; }}
+          >Limpiar cola</button>
+        </div>
+
+        {/* Stats */}
+        {hasFiles && (
+          <div style={{ display: 'flex', gap: 14, alignItems: 'center', marginLeft: 8 }}>
+            <span style={{ fontSize: 11, color: C.textMuted }}>
+              <span style={{ color: gold, fontWeight: 500 }}>{totalCount}</span> analizados
+            </span>
+            <span style={{ fontSize: 11, color: C.textMuted }}>
+              <span style={{ color: C.success, fontWeight: 500 }}>{savedCount}</span> guardados
+            </span>
+          </div>
+        )}
+
+        {/* Mode badge */}
+        <div style={{
+          background: C.surface2, border: `1px solid ${C.border}`,
+          borderRadius: 3, padding: '3px 10px',
+          fontSize: 10, color: accent, fontWeight: 500,
+          letterSpacing: '0.1em', textTransform: 'uppercase',
+        }}>● PDF activo</div>
+      </div>
+
+      {/* ── PARAM BAR ── */}
+      <div style={{
+        height: paramBarH, flexShrink: 0,
+        padding: '5px 16px',
+        background: C.surface1,
+        borderBottom: `1px solid ${C.border}`,
+      }}>
+        <ParamBar params={MOCK_PARAMS} />
+      </div>
+
+      {/* ── MAIN CONTENT ── */}
+      <div ref={containerRef} style={{
+        flex: 1, display: 'flex', minHeight: 0,
+        overflow: 'hidden',
+      }}>
+
+        {/* LEFT: file queue */}
+        <div style={{
+          width: `${leftWidth}%`, minWidth: 200,
+          display: 'flex', flexDirection: 'column',
+          borderRight: `1px solid ${C.border}`,
+          overflow: 'hidden',
+        }}>
+          {/* Queue header */}
+          <div style={{
+            padding: '8px 14px 6px',
+            borderBottom: `1px solid ${C.border}`,
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            flexShrink: 0,
+          }}>
+            <span style={{ fontSize: 10.5, fontWeight: 500, color: C.textDim, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+              Cola
+            </span>
+            {hasFiles && (
+              <span style={{ fontSize: 10, color: C.textDim }}>
+                {totalCount} archivo{totalCount !== 1 ? 's' : ''}
+              </span>
+            )}
+          </div>
+
+          {/* Suggested-by label */}
+          {hasFiles && (
+            <div style={{
+              padding: '5px 14px',
+              borderBottom: `1px solid ${C.border}`,
+              fontSize: 10, color: C.textDim, fontWeight: 300,
+            }}>
+              Nombre sugerido para renombrar
+            </div>
+          )}
+
+          {/* File list */}
+          <div style={{
+            flex: 1, overflowY: 'auto',
+            padding: hasFiles ? '10px 12px' : 0,
+          }}>
+            {!hasFiles
+              ? <EmptyState />
+              : files.map(f => (
+                <FileItem
+                  key={f.id} file={f}
+                  isSelected={f.id === selectedId}
+                  onSelect={handleSelect}
+                  onSave={handleSave}
+                  onRemove={handleRemove}
+                  onChange={handleChange}
+                />
+              ))
+            }
+          </div>
+        </div>
+
+        {/* H DRAG DIVIDER */}
+        <div
+          className="drag-divider"
+          onMouseDown={startDragH}
+          style={{ width: 4, background: C.border, cursor: 'col-resize', flexShrink: 0 }}
+        />
+
+        {/* RIGHT: preview + text */}
+        <div style={{
+          width: rightWidth, flexShrink: 0,
+          display: 'flex', flexDirection: 'column',
+          borderLeft: `1px solid ${C.border}`,
+          background: C.surface1,
+          minWidth: 160,
+          overflow: 'hidden',
+        }}>
+          {/* Panel header */}
+          <div style={{
+            padding: '8px 12px 6px',
+            borderBottom: `1px solid ${C.border}`,
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            flexShrink: 0,
+          }}>
+            <div style={{ display: 'flex', gap: 4 }}>
+              {['preview', 'text'].map(tab => (
+                <button key={tab} onClick={() => setActiveTab(tab)} style={{
+                  background: activeTab === tab ? C.surface3 : 'transparent',
+                  border: `1px solid ${activeTab === tab ? C.borderLight : 'transparent'}`,
+                  color: activeTab === tab ? C.text : C.textDim,
+                  borderRadius: 3, padding: '3px 10px',
+                  fontSize: 10, fontWeight: activeTab === tab ? 500 : 400,
+                  fontFamily: 'Roboto, sans-serif',
+                  cursor: 'pointer', letterSpacing: '0.05em', textTransform: 'uppercase',
+                  transition: 'all 0.15s',
+                }}>
+                  {tab === 'preview' ? 'Vista previa' : 'Texto'}
+                </button>
+              ))}
+            </div>
+            {hasFiles && selectedFile && (
+              <span style={{ fontSize: 9.5, color: C.textDim, maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {selectedFile.originalName}
+              </span>
+            )}
+          </div>
+
+          {activeTab === 'preview' ? (
+            /* PDF PREVIEW */
+            <div style={{ flex: 1, padding: 12, display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto' }}>
+              <PDFThumbnail fileIndex={selectedFile ? selectedFile.textIdx : null} />
+
+              {/* Page controls */}
+              {hasFiles && selectedFile && (
+                <>
+                  <div style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  }}>
+                    <button
+                      onClick={() => setPageNum(p => Math.max(1, p - 1))}
+                      style={{ background: C.surface2, border: `1px solid ${C.border}`, color: C.textMuted, borderRadius: 3, padding: '3px 8px', cursor: 'pointer', fontSize: 13, fontFamily: 'Roboto, sans-serif' }}
+                    >‹</button>
+                    <span style={{ fontSize: 10.5, color: C.textMuted, minWidth: 60, textAlign: 'center' }}>
+                      pág. {pageNum} / 3
+                    </span>
+                    <button
+                      onClick={() => setPageNum(p => Math.min(3, p + 1))}
+                      style={{ background: C.surface2, border: `1px solid ${C.border}`, color: C.textMuted, borderRadius: 3, padding: '3px 8px', cursor: 'pointer', fontSize: 13, fontFamily: 'Roboto, sans-serif' }}
+                    >›</button>
+                    <button style={{ background: C.surface2, border: `1px solid ${C.border}`, color: C.textMuted, borderRadius: 3, padding: '3px 7px', cursor: 'pointer', fontSize: 10, fontFamily: 'Roboto, sans-serif' }}>⤡</button>
+                  </div>
+                  <div style={{ fontSize: 9.5, color: C.textDim, textAlign: 'center', letterSpacing: '0.02em' }}>
+                    {selectedFile.originalName}
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            /* TEXT PANEL */
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 12, gap: 6, overflow: 'hidden' }}>
+              <div style={{ fontSize: 10, color: C.textDim, letterSpacing: '0.05em', textTransform: 'uppercase', fontWeight: 500 }}>
+                Texto extraído · pág. 1
+              </div>
+              <textarea
+                value={selectedFile ? MOCK_TEXTS[selectedFile.textIdx] : 'Sin texto'}
+                onChange={() => {}}
+                style={{
+                  flex: 1, background: C.surface2,
+                  border: `1px solid ${C.border}`,
+                  borderRadius: 4,
+                  color: C.textMuted, fontSize: 11,
+                  fontFamily: "'Roboto Mono', 'Courier New', monospace",
+                  padding: '10px 12px', resize: 'none', outline: 'none',
+                  lineHeight: 1.65,
+                }}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* R DRAG DIVIDER */}
+        <div
+          className="drag-divider"
+          onMouseDown={startDragR}
+          style={{ width: 4, background: C.border, cursor: 'col-resize', flexShrink: 0, order: -1, position: 'absolute', display: 'none' }}
+        />
+      </div>
+
+      {/* ── LOG / CONSOLE ── */}
+      {tweaks.logVisible && (
+        <>
+          {/* V drag divider */}
+          <div
+            onMouseDown={startDragV}
+            style={{
+              height: 4, background: C.border,
+              cursor: 'row-resize', flexShrink: 0,
+              transition: 'background 0.2s',
+            }}
+            onMouseEnter={e => e.target.style.background = gold}
+            onMouseLeave={e => e.target.style.background = C.border}
+          />
+          <div style={{
+            height: logHeight, flexShrink: 0,
+            background: C.surface1,
+            borderTop: `1px solid ${C.border}`,
+            display: 'flex', flexDirection: 'column',
+            overflow: 'hidden',
+          }}>
+            <div style={{
+              padding: '4px 12px', borderBottom: `1px solid ${C.border}`,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              flexShrink: 0,
+            }}>
+              <span style={{ fontSize: 9.5, color: C.textDim, fontWeight: 500, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                Consola
+              </span>
+              <button
+                onClick={() => setLogs(MOCK_LOG_EMPTY)}
+                style={{ background: 'transparent', border: 'none', color: C.textDim, fontSize: 10, cursor: 'pointer', fontFamily: 'Roboto, sans-serif', letterSpacing: '0.04em' }}
+                onMouseEnter={e => e.target.style.color = C.text}
+                onMouseLeave={e => e.target.style.color = C.textDim}
+              >Limpiar</button>
+            </div>
+            <LogPanel logs={logs} />
+          </div>
+        </>
+      )}
+
+      {/* ── STATUS BAR ── */}
+      <div style={{
+        height: statusBarH, flexShrink: 0,
+        background: C.surface1,
+        borderTop: `1px solid ${C.border}`,
+        display: 'flex', alignItems: 'center',
+        padding: '0 14px', gap: 16,
+      }}>
+        <span style={{ fontSize: 10, color: C.textDim }}>
+          {hasFiles ? `${totalCount} PDFs en cola · ${savedCount} guardados` : 'Sin archivos en cola'}
+        </span>
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 10, color: C.textDim }}>
+          {selectedFile ? selectedFile.originalName : '—'}
+        </span>
+        <div style={{ width: 1, height: 12, background: C.border }} />
+        <span style={{ fontSize: 10, color: C.textDim }}>Modo: renombrar</span>
+      </div>
+
+      {/* ── TWEAKS PANEL ── */}
+      <TweaksPanel>
+        <TweakSection label="Colores" />
+        <TweakColor label="Acento principal" value={tweaks.accentColor} onChange={v => setTweak('accentColor', v)} />
+        <TweakColor label="Color dorado" value={tweaks.goldColor} onChange={v => setTweak('goldColor', v)} />
+        <TweakSection label="Interfaz" />
+        <TweakToggle label="Mostrar consola" value={tweaks.logVisible} onChange={v => setTweak('logVisible', v)} />
+        <TweakRadio label="Densidad" value={tweaks.density} options={['compact', 'normal', 'relaxed']} onChange={v => setTweak('density', v)} />
+      </TweaksPanel>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
