@@ -16,7 +16,15 @@ import os
 import shutil
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+
+# Workers concurrentes para el pipeline de renombrado. La latencia es
+# casi toda red (CrossRef / OpenAlex / Semantic Scholar / Open Library),
+# así que paralelizar I/O da el mayor speedup. 4 es un punto seguro:
+# CrossRef tolera ~50 req/s, OpenAlex 10/s y S2 ~100 req/5min — con 4
+# workers ninguno se acerca al rate-limit.
+ANALYZE_WORKERS = 4
 
 import PyPDF2
 import webview
@@ -186,70 +194,96 @@ class Api:
         return snapshot
 
     def _analyze_thread(self, ids: list[int]) -> None:
+        """Dispatcher: corre los workers en paralelo y emite el "done" final."""
         try:
-            self._emit("log", {"level": "info", "msg": f"── Analizando {len(ids)} archivo(s) ──"})
+            self._emit("log", {
+                "level": "info",
+                "msg":   f"── Analizando {len(ids)} archivo(s) en paralelo (≤{ANALYZE_WORKERS}) ──",
+            })
 
-            for fid in ids:
-                entry = self.files.get(fid)
-                if entry is None:
-                    continue
-
-                self._emit("log", {"level": "info", "msg": f"── {entry.orig}"})
-                self._emit("progress", {"id": fid, "status": "analyzing"})
-
-                # Capturamos la "fuente" desde los logs del motor.
-                src_holder = {"value": ""}
-
-                def log(msg: str, color: str = TEXT_PRI, _h=src_holder, _fid=fid) -> None:
-                    level = _color_to_level(color)
-                    if "Fuente:" in msg:
-                        _h["value"] = msg.split("Fuente:", 1)[-1].strip()
-                    self._emit("log", {"level": level, "msg": msg, "fileId": _fid})
-
-                try:
-                    with open(entry.path, "rb") as f:
-                        reader = PyPDF2.PdfReader(f)
-                        if not reader.pages:
-                            raise ValueError("PDF sin páginas.")
-                        new_name = get_new_name(reader, entry.path, log)
-
-                    entry.name = new_name
-                    entry.src  = src_holder["value"] or "heurística"
-
-                    # Abrir fitz para preview / texto bajo demanda
-                    self._open_fitz(entry)
-
-                    self._emit("log", {
-                        "level":  "ok",
-                        "msg":    f"✓ {entry.orig} → {new_name}",
-                        "fileId": fid,
-                    })
-                    self._emit("progress", {
-                        "id":        fid,
-                        "status":    "done",
-                        "name":      new_name,
-                        "src":       entry.src,
-                        "pageCount": entry.page_count,
-                    })
-
-                except Exception as e:
-                    msg = str(e) or e.__class__.__name__
-                    entry.error = msg
-                    self._emit("log", {
-                        "level":  "err",
-                        "msg":    f"Error en {entry.orig}: {msg}",
-                        "fileId": fid,
-                    })
-                    self._emit("progress", {
-                        "id":     fid,
-                        "status": "error",
-                        "error":  msg,
-                    })
+            with ThreadPoolExecutor(
+                max_workers=ANALYZE_WORKERS,
+                thread_name_prefix="pdf-analyze",
+            ) as pool:
+                futures = [pool.submit(self._analyze_one, fid) for fid in ids]
+                for fut in futures:
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        # Los workers manejan sus propios errores; este
+                        # catch es defensivo para excepciones inesperadas.
+                        self._emit("log", {"level": "err", "msg": f"Worker excepcion: {e}"})
+                        traceback.print_exc()
 
             self._emit("log", {"level": "ok", "msg": "✓ Análisis completo. Revisá la cola y guardá."})
             self._emit("done", {})
         finally:
             self._busy = False
+
+    def _analyze_one(self, fid: int) -> None:
+        """Procesa un único PDF — puede correr concurrente con otros.
+
+        Es seguro porque cada worker:
+          - Abre su propio file handle (PyPDF2 reader local al thread)
+          - Trabaja sobre su propio FileEntry (sin compartir estado con otros)
+          - Las llamadas HTTP (urllib) y los logs (`window.evaluate_js`)
+            son thread-safe.
+        """
+        entry = self.files.get(fid)
+        if entry is None:
+            return
+
+        self._emit("log", {"level": "info", "msg": f"── {entry.orig}"})
+        self._emit("progress", {"id": fid, "status": "analyzing"})
+
+        # Capturamos la "fuente" desde los logs del motor.
+        src_holder = {"value": ""}
+
+        def log(msg: str, color: str = TEXT_PRI, _h=src_holder, _fid=fid) -> None:
+            level = _color_to_level(color)
+            if "Fuente:" in msg:
+                _h["value"] = msg.split("Fuente:", 1)[-1].strip()
+            self._emit("log", {"level": level, "msg": msg, "fileId": _fid})
+
+        try:
+            with open(entry.path, "rb") as f:
+                reader = PyPDF2.PdfReader(f)
+                if not reader.pages:
+                    raise ValueError("PDF sin páginas.")
+                new_name = get_new_name(reader, entry.path, log)
+
+            entry.name = new_name
+            entry.src  = src_holder["value"] or "heurística"
+
+            # Abrir fitz para preview / texto bajo demanda
+            self._open_fitz(entry)
+
+            self._emit("log", {
+                "level":  "ok",
+                "msg":    f"✓ {entry.orig} → {new_name}",
+                "fileId": fid,
+            })
+            self._emit("progress", {
+                "id":        fid,
+                "status":    "done",
+                "name":      new_name,
+                "src":       entry.src,
+                "pageCount": entry.page_count,
+            })
+
+        except Exception as e:
+            msg = str(e) or e.__class__.__name__
+            entry.error = msg
+            self._emit("log", {
+                "level":  "err",
+                "msg":    f"Error en {entry.orig}: {msg}",
+                "fileId": fid,
+            })
+            self._emit("progress", {
+                "id":     fid,
+                "status": "error",
+                "error":  msg,
+            })
 
     def list_files(self) -> list[dict]:
         return [self.files[k].to_dict() for k in sorted(self.files.keys())]
