@@ -38,7 +38,7 @@ def main() -> None:
 
     api = Api()
     window = webview.create_window(
-        title="PDF Scholar",
+        title="Nomenclador Académico",
         url=UI_INDEX_REL,
         js_api=api,
         width=1280,

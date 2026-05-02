@@ -8,10 +8,6 @@ const { useState, useEffect, useRef, useCallback } = React;
 
 const PARAMS = ['autores', 'año', 'crossref título', 'tipo', 'heurísticas'];
 
-const LOG_INIT = [
-  { t: 'inf', s: 'PDF Scholar listo. Sube archivos para comenzar.' },
-];
-
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const apiReady = () =>
   new Promise((resolve) => {
@@ -345,21 +341,6 @@ function PDFViewer({ file, page }) {
   );
 }
 
-// ── Console ──────────────────────────────────────────────────────────────────
-function Console({ logs }) {
-  const r = useRef(null);
-  useEffect(() => { if (r.current) r.current.scrollTop = r.current.scrollHeight; }, [logs]);
-  const cls = (t) => t === 'ok' ? 'l-ok' : t === 'err' ? 'l-err' : t === 'warn' ? 'l-warn' : 'l-inf';
-  return (
-    <div ref={r} className="console-wrap">
-      {logs.map((l, i) => (
-        <div key={i} className={cls(l.t)}
-          style={{ paddingLeft: l.s.startsWith('  ') ? 12 : 0 }}>{l.s}</div>
-      ))}
-    </div>
-  );
-}
-
 // ── File item ────────────────────────────────────────────────────────────────
 function FileItem({ f, sel, onSel, onSave, onRm, onChange }) {
   return (
@@ -392,12 +373,10 @@ function FileItem({ f, sel, onSel, onSave, onRm, onChange }) {
 function App() {
   const [files,    setFiles]    = useState([]);
   const [selId,    setSelId]    = useState(null);
-  const [logs,     setLogs]     = useState(LOG_INIT);
   const [tab,      setTab]      = useState('preview');
   const [pg,       setPg]       = useState(1);
   const [leftPct,  setLeftPct]  = useState(60);
   const [rightW,   setRightW]   = useState(285);
-  const [logH,     setLogH]     = useState(130);
   const [busy,     setBusy]     = useState(false);
   const [overlay,  setOverlay]  = useState(null);  // { files: [...] }
   const [doneIds,  setDoneIds]  = useState(() => new Set());
@@ -406,7 +385,6 @@ function App() {
   const [env,      setEnv]      = useState({ ocrAvailable:false, thumbAvailable:false, maxFiles:50 });
 
   const dragH = useRef(false);
-  const dragV = useRef(false);
   const dragR = useRef(false);
   const cRef  = useRef(null);
 
@@ -418,9 +396,10 @@ function App() {
   // ── Bridge wiring (events from Python) ─────────────────────────────────────
   useEffect(() => {
     window.__pdfBridge = {
-      onLog: (entry) => {
-        setLogs((p) => [...p.slice(-300), { t: entry.level, s: entry.msg }]);
-      },
+      // Logs del motor: ya no se muestran (no hay consola). Se descartan
+      // silenciosamente; los errores siguen llegando como `progress`
+      // events con status='error'.
+      onLog: () => {},
       onProgress: (p) => {
         if (p.status === 'analyzing') return;
         if (p.status === 'done') {
@@ -447,12 +426,6 @@ function App() {
     apiReady().then(async () => {
       const e = await call('env');
       setEnv(e);
-      setLogs((p) => [
-        ...p,
-        { t: 'inf', s: `Límite: ${e.maxFiles} archivos por sesión.` },
-        ...(e.ocrAvailable ? [{ t: 'inf', s: 'OCR activo.' }]
-                           : [{ t: 'warn', s: 'OCR inactivo. Instalar pytesseract + Tesseract para activarlo.' }]),
-      ]);
     });
   }, []);
 
@@ -463,16 +436,12 @@ function App() {
         const r = cRef.current.getBoundingClientRect();
         setLeftPct(Math.min(80, Math.max(20, ((e.clientX - r.left) / (r.width - rightW - 1)) * 100)));
       }
-      if (dragV.current && cRef.current) {
-        const r = cRef.current.getBoundingClientRect();
-        setLogH(Math.min(280, Math.max(55, r.bottom - e.clientY)));
-      }
       if (dragR.current && cRef.current) {
         const r = cRef.current.getBoundingClientRect();
         setRightW(Math.min(420, Math.max(180, r.right - e.clientX)));
       }
     };
-    const up = () => { dragH.current = false; dragV.current = false; dragR.current = false; };
+    const up = () => { dragH.current = false; dragR.current = false; };
     window.addEventListener('mousemove', mv);
     window.addEventListener('mouseup', up);
     return () => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); };
@@ -507,7 +476,6 @@ function App() {
   const clear = async () => {
     await call('clear_all');
     setFiles([]); setSelId(null); setDoneIds(new Set()); setErrorIds(new Set());
-    setLogs((p) => [...p, { t: 'inf', s: 'Cola limpiada.' }]);
   };
 
   const saveOne = async (id) => {
@@ -533,14 +501,9 @@ function App() {
 
   const pick = (id) => { setSelId(id); setPg(1); };
 
-  // ── Tweaks ──────────────────────────────────────────────────────────────────
-  const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
-    "showConsole": true,
-  }/*EDITMODE-END*/;
-  const [tw, setTweak] = (window.useTweaks || ((d) => [d, () => {}]))(TWEAK_DEFAULTS);
-
-  const TOP_H   = 50;
-  const PARAM_H = 34;
+  const TOP_H    = 50;
+  const PARAM_H  = 34;
+  const FOOTER_H = 70;
 
   const totalPages = sel?.pageCount || 1;
 
@@ -564,15 +527,12 @@ function App() {
         </div>
 
         <div style={{ display:'flex', flexDirection:'column', justifyContent:'center', marginRight:4 }}>
-          <span style={{ fontSize:14, fontWeight:700, letterSpacing:'-0.02em', color:'rgba(228,234,248,0.92)', lineHeight:1.15 }}>PDF Scholar</span>
-          <div style={{ display:'flex', gap:10 }}>
-            {['Archivo','Editar','Documentos'].map((m) => (
-              <span key={m} style={{ fontSize:10, color:'rgba(145,158,195,0.38)', cursor:'pointer', fontWeight:300, letterSpacing:'0.015em', transition:'color 0.15s' }}
-                onMouseEnter={(e) => e.target.style.color = 'rgba(195,208,238,0.65)'}
-                onMouseLeave={(e) => e.target.style.color = 'rgba(145,158,195,0.38)'}
-              >{m}</span>
-            ))}
-          </div>
+          <span style={{
+            fontSize:15, fontWeight:600,
+            letterSpacing:'-0.005em',
+            color:'rgba(228,234,248,0.92)',
+            lineHeight:1.15,
+          }}>Nomenclador Académico</span>
         </div>
 
         <div style={{ width:'0.5px', height:26, background:'rgba(255,255,255,0.06)', margin:'0 6px' }} />
@@ -704,40 +664,33 @@ function App() {
         </div>
       </div>
 
-      {/* CONSOLE */}
-      {tw.showConsole && (
-        <>
-          <div className="div-v" onMouseDown={() => { dragV.current = true; }} />
-          <div style={{ height:logH, flexShrink:0, display:'flex', flexDirection:'column', overflow:'hidden', background:'rgba(0,0,0,0.22)', borderTop:'0.5px solid rgba(255,255,255,0.035)' }}>
-            <div style={{ padding:'4px 14px', borderBottom:'0.5px solid rgba(255,255,255,0.028)', display:'flex', alignItems:'center', justifyContent:'space-between', flexShrink:0 }}>
-              <span className="mlabel">Consola</span>
-              <button onClick={() => setLogs(LOG_INIT)} style={{ background:'transparent', border:'none', color:'rgba(145,158,195,0.28)', fontSize:10, cursor:'pointer', fontFamily:'Roboto,sans-serif', letterSpacing:'0.04em', transition:'color 0.15s' }}
-                onMouseEnter={(e) => e.target.style.color = 'rgba(195,208,238,0.58)'}
-                onMouseLeave={(e) => e.target.style.color = 'rgba(145,158,195,0.28)'}
-              >Limpiar</button>
-            </div>
-            <Console logs={logs} />
+      {/* CREDITS FOOTER */}
+      <div className="credits-footer" style={{ height: FOOTER_H }}>
+        <div className="credits-logo">
+          <img
+            src="assets/latdaa.png"
+            alt="LATDAA"
+            onError={(e) => { e.target.style.display = 'none'; }}
+            draggable={false}
+          />
+        </div>
+
+        <div className="credits-text">
+          <div className="credits-line-main">
+            Creado por <strong>Dr. Emilio A. Villafañez</strong>
           </div>
-        </>
-      )}
+          <div className="credits-line-sub">
+            Escuela de Arqueología · Universidad Nacional de Catamarca (Argentina) · CONICET · Fundación Azara
+          </div>
+        </div>
 
-      {/* STATUS BAR */}
-      <div className="sbar">
-        <div className={`sbar-dot${busy ? ' busy' : ''}`} />
-        <span className="sbar-txt">{hasFiles ? `${total} PDFs en cola · ${saved} guardados` : 'Sin archivos en cola'}</span>
-        <div style={{ flex:1 }} />
-        {sel && <span className="sbar-txt" style={{ fontFamily:'Roboto Mono,monospace' }}>{sel.orig}</span>}
-        <div style={{ width:'0.5px', height:11, background:'rgba(255,255,255,0.06)' }} />
-        <span className="sbar-txt">modo: renombrar</span>
+        <div className="credits-stats">
+          <div className={`sbar-dot${busy ? ' busy' : ''}`} />
+          <span className="credits-stats-txt">
+            {hasFiles ? `${total} PDFs · ${saved} guardados` : 'Sin archivos'}
+          </span>
+        </div>
       </div>
-
-      {/* TWEAKS */}
-      {window.TweaksPanel && (
-        <window.TweaksPanel title="Tweaks">
-          <window.TweakSection label="Interfaz" />
-          <window.TweakToggle label="Mostrar consola" value={tw.showConsole} onChange={(v) => setTweak('showConsole', v)} />
-        </window.TweaksPanel>
-      )}
 
       {/* LOADING OVERLAY */}
       {overlay && <LoadingOverlay files={overlay.files} doneIds={doneIds} errorIds={errorIds} />}

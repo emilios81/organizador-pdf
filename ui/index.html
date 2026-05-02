@@ -288,18 +288,73 @@ body::before {
   align-items: center; justify-content: center; gap: 10px;
 }
 
-/* ── Status bar ── */
-.sbar {
-  height: 22px; flex-shrink: 0;
-  background: rgba(0,0,0,0.25);
-  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-  border-top: 0.5px solid rgba(255,255,255,0.04);
-  display: flex; align-items: center;
-  padding: 0 14px; gap: 12px;
-}
-.sbar-txt { font-size: 10px; color: rgba(140,155,190,0.42); letter-spacing: 0.02em; }
+/* ── Status bar (legacy, kept for the dot animation) ── */
 .sbar-dot { width: 5px; height: 5px; border-radius: 50%; background: rgba(72,195,130,0.45); box-shadow: 0 0 6px rgba(72,195,130,0.35); flex-shrink: 0; }
 .sbar-dot.busy { background: rgba(220,170,70,0.85); box-shadow: 0 0 6px rgba(220,170,70,0.5); animation: breathe 1.4s ease-in-out infinite; }
+
+/* ── Credits footer ── */
+.credits-footer {
+  flex-shrink: 0;
+  background: rgba(0,0,0,0.22);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  border-top: 0.5px solid rgba(255,255,255,0.04);
+  display: flex; align-items: center;
+  padding: 0 22px;
+  gap: 16px;
+}
+.credits-logo {
+  flex-shrink: 0;
+  display: flex; align-items: center;
+  height: 48px;
+}
+.credits-logo img {
+  height: 100%; width: auto;
+  max-width: 200px;
+  object-fit: contain;
+  /* Adapta el PNG (fondo blanco + texto negro) al tema oscuro:
+     invert + hue-rotate(180deg) preserva los colores (rojo, beige) y
+     transforma negro→blanco y blanco→negro (que se funde con el fondo). */
+  filter: invert(1) hue-rotate(180deg) brightness(1.05);
+  opacity: 0.9;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.credits-text {
+  flex: 1; min-width: 0;
+  text-align: center;
+  font-family: 'Roboto', sans-serif;
+  line-height: 1.5;
+}
+.credits-line-main {
+  font-size: 12px;
+  font-weight: 400;
+  color: rgba(218,228,248,0.78);
+  letter-spacing: 0.005em;
+}
+.credits-line-main strong {
+  font-weight: 600;
+  color: rgba(225,200,140,0.92);
+}
+.credits-line-sub {
+  font-size: 10.5px;
+  font-weight: 300;
+  color: rgba(160,175,210,0.55);
+  letter-spacing: 0.015em;
+  margin-top: 2px;
+}
+.credits-stats {
+  flex-shrink: 0;
+  display: flex; align-items: center; gap: 8px;
+  min-width: 130px;
+  justify-content: flex-end;
+}
+.credits-stats-txt {
+  font-size: 10px;
+  color: rgba(140,155,190,0.55);
+  letter-spacing: 0.02em;
+  font-family: 'Roboto Mono', monospace;
+}
 
 /* ── Micro label ── */
 .mlabel {
