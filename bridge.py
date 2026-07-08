@@ -178,13 +178,33 @@ class Api:
             paths = paths[:MAX_PDFS]
 
         new_entries: list[FileEntry] = []
+        skipped = 0
         with self._lock:
+            # No re-encolar archivos que ya están en la cola (mismo path):
+            # si el usuario re-selecciona una carpeta con archivos ya
+            # analizados, se duplicaban y el guardado en lote los copiaba
+            # dos veces.
+            queued = {os.path.normcase(os.path.abspath(e.path))
+                      for e in self.files.values()}
             for p in paths:
+                key = os.path.normcase(os.path.abspath(p))
+                if key in queued:
+                    skipped += 1
+                    continue
+                queued.add(key)
                 fid = self._next_id
                 self._next_id += 1
                 entry = FileEntry(fid, p)
                 self.files[fid] = entry
                 new_entries.append(entry)
+
+        if skipped:
+            self._emit("log", {
+                "level": "warn",
+                "msg":   f"{skipped} archivo(s) ya estaban en la cola — omitidos.",
+            })
+        if not new_entries:
+            return []
 
         snapshot = [e.to_dict() for e in new_entries]
         self._busy = True
@@ -389,9 +409,17 @@ class Api:
             # mismo nombre): sufijo ' (2)', ' (3)', …
             base, ext = os.path.splitext(dest)
             n = 2
+            collided = os.path.exists(dest)
             while os.path.exists(dest):
                 dest = f"{base} ({n}){ext}"
                 n += 1
+            if collided:
+                self._emit("log", {
+                    "level": "warn",
+                    "msg":   (f"⚠ {entry.orig}: ya existe un PDF con el nombre "
+                              f"«{nombre}» — posible duplicado; guardado como "
+                              f"{os.path.basename(dest)}"),
+                })
             try:
                 shutil.copy2(entry.path, dest)
                 entry.saved = True
