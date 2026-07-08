@@ -27,3 +27,6 @@ Thumbs.db
 
 # Config local (contiene la API key — nunca commitear)
 config.json
+
+# Settings locales de Claude Code (por máquina, no van al repo)
+.claude/settings.local.json
