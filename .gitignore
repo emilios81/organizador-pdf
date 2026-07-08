@@ -24,3 +24,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Config local (contiene la API key — nunca commitear)
+config.json

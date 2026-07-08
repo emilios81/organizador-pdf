@@ -1,0 +1,5 @@
+{
+  "_comentario": "Copiar este archivo como config.json y completar la key para activar el extractor por IA (opcional). Sin esto, el programa funciona igual con el pipeline clásico.",
+  "anthropic_api_key": "sk-ant-...",
+  "llm_model": "claude-haiku-4-5"
+}

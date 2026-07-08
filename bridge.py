@@ -138,9 +138,11 @@ class Api:
     # ── Métodos llamables desde JS ───────────────────────────────────────────
     def env(self) -> dict:
         """Capacidades disponibles (mostradas en el header)."""
+        import llm_extract
         return {
             "ocrAvailable":   engine.OCR_AVAILABLE,
             "thumbAvailable": engine.THUMB_AVAILABLE,
+            "llmBackend":     llm_extract.backend_cached(),  # "api"|"cli"|"none"|"unknown"
             "maxFiles":       MAX_PDFS,
         }
 

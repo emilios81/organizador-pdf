@@ -14,10 +14,14 @@ import re
 import json
 import shutil
 import threading
+import unicodedata
 import urllib.request
 import urllib.parse
 
 import PyPDF2
+
+import header as header_mod
+import llm_extract
 
 # ── Miniaturas y OCR opcionales ────────────────────────────────────────────────
 # Instalar con: pip install pymupdf pytesseract Pillow
@@ -136,6 +140,17 @@ def _metadata_looks_valid(title: str, author: str) -> bool:
     if any(w in al for w in ("pdfcreator", "nitro", "foxit", "acrobat")):
         return False
 
+    # ── Autor: herramientas de IA (dejan su nombre en PDFs exportados) ───────
+    if any(w in al for w in ("chatgpt", "gpt-", "openai", "claude", "gemini",
+                             "copilot", "perplexity", "notebooklm",
+                             "deep research", "deepseek")):
+        return False
+
+    # ── Título: demasiado corto para ser un título académico real ────────────
+    # (placeholders tipo 'Mesa temática –' pasan los filtros anteriores)
+    if len(title.split()) < 3 and len(title) < 25:
+        return False
+
     return True
 
 
@@ -184,15 +199,24 @@ def _extract_text(reader: PyPDF2.PdfReader, ruta: str, log) -> str:
     pages = min(PAGES_SCAN, len(reader.pages))
     full  = ""
 
+    # PyMuPDF extrae con mejor orden de lectura y maneja ligaduras (ﬂ→fl);
+    # PyPDF2 queda como fallback y para cuando PyMuPDF no está instalado.
     doc_fitz = None
-    if OCR_AVAILABLE:
+    if THUMB_AVAILABLE:
         try:
             doc_fitz = fitz.open(ruta)
         except Exception:
             pass
 
     for i in range(pages):
-        page_text = reader.pages[i].extract_text() or ""
+        page_text = ""
+        if doc_fitz is not None and i < doc_fitz.page_count:
+            try:
+                page_text = doc_fitz[i].get_text("text") or ""
+            except Exception:
+                page_text = ""
+        if len(page_text.strip()) < 30:
+            page_text = reader.pages[i].extract_text() or ""
 
         if len(page_text.strip()) < 30:
             if OCR_AVAILABLE and doc_fitz:
@@ -432,15 +456,24 @@ def _title_candidates_for_search(text: str) -> list:
     return queries[:6]   # máximo 6 intentos
 
 
+def _deaccent(s: str) -> str:
+    """'Arqueología' → 'arqueologia'. Crítico para comparar texto extraído
+    (que suele perder tildes por encoding/OCR) contra títulos canónicos
+    de las APIs (que las traen)."""
+    nfkd = unicodedata.normalize("NFKD", s.lower())
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
 def _title_similarity(q: str, api_title: str) -> tuple:
     """
     Devuelve (fracción, count_overlap): fracción de palabras ≥4 chars del
     api_title que aparecen en q, y cantidad absoluta de palabras en común.
     Usar ambas en validación: fracción alta + count mínimo evita matches
     espurios con títulos API cortos (donde 1/2 palabras da ratio 0.5).
+    Compara sin tildes en ambos lados.
     """
-    q_words = set(re.findall(r'[a-záéíóúüñ]{4,}', q.lower()))
-    t_words = set(re.findall(r'[a-záéíóúüñ]{4,}', api_title.lower()))
+    q_words = set(re.findall(r'[a-zñ]{4,}', _deaccent(q)))
+    t_words = set(re.findall(r'[a-zñ]{4,}', _deaccent(api_title)))
     if not t_words:
         return (0.0, 0)
     common = q_words & t_words
@@ -720,7 +753,16 @@ def _query_open_library(isbn: str) -> str | None:
         author_str = "Anónimo"
     else:
         names = [a.get("name", "?") for a in authors]
-        fams  = [n.split()[-1] for n in names]
+        # Último token alfabético como apellido (evita basura tipo 'Argentina)'
+        # cuando el registro trae paréntesis o lugares en el nombre).
+        fams = []
+        for n in names:
+            toks = [t.strip("(),.") for t in n.split()]
+            toks = [t for t in toks if t and re.fullmatch(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-']+", t)]
+            if toks:
+                fams.append(toks[-1])
+        if not fams:
+            fams = ["Anónimo"]
         if len(fams) == 1:   author_str = fams[0]
         elif len(fams) == 2: author_str = f"{fams[0]} y {fams[1]}"
         else:                author_str = f"{fams[0]} et al"
@@ -1241,6 +1283,175 @@ def _heuristic_lines(text: str) -> str:
     return _sanitize(f"{author_str} ({year}) - {title}")
 
 
+# ── 6. Cabecera estructural (tipografía) + LLM opcional ──────────────────────
+#
+# El título de un artículo es casi siempre el texto con la fuente MÁS GRANDE
+# de su primera página, en cualquier revista. `header.py` explota esa señal
+# universal. Con ese título limpio (más un apellido), la búsqueda en CrossRef/
+# OpenAlex pasa de no matchear nunca (candidatos basura del texto plano) a
+# resolver la mayoría de los papers sin DOI.
+
+def _verify_via_apis(title: str, first_surname: str, text: str, log) -> str | None:
+    """Busca `title` (+autor) en CrossRef y OpenAlex y devuelve el registro
+    canónico si pasa las validaciones de similitud/autor/año contra el texto."""
+    text_lower = _deaccent(text)
+    text_years = set(re.findall(r'\b(?:19|20)\d{2}\b', text))
+    author_q = f"&query.author={urllib.parse.quote(first_surname)}" if first_surname else ""
+
+    # CrossRef
+    url = (
+        "https://api.crossref.org/works?"
+        f"query.title={urllib.parse.quote(title[:250])}"
+        f"{author_q}&rows=3&select=title,author,issued,score"
+    )
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(url, headers={"User-Agent": UA}), timeout=10
+        ) as r:
+            items = json.loads(r.read()).get("message", {}).get("items", [])
+    except Exception:
+        items = []
+
+    for item in items:
+        api_title = (item.get("title", [""]) or [""])[0]
+        if not api_title or not _api_title_is_clean(api_title):
+            continue
+        sim, common = _title_similarity(title, api_title)
+        if sim < 0.70 or common < 3:
+            continue
+        year = None
+        parts = item.get("issued", {}).get("date-parts", [[None]])[0]
+        if parts and parts[0]:
+            year = str(parts[0])
+        if year and text_years and \
+           not any(abs(int(year) - int(ty)) <= 1 for ty in text_years):
+            continue
+        fams = [a.get("family", "") for a in item.get("author", []) if a.get("family")]
+        if fams and not any(_deaccent(f) in text_lower for f in fams):
+            continue
+        author_str = _format_authors_crossref(item.get("author", []))
+        log(f"CrossRef confirmó el candidato (sim={sim:.2f})", TEXT_OK)
+        return _sanitize(f"{author_str} ({year or 's.f.'}) - {api_title}")
+
+    # OpenAlex
+    q = f"{title} {first_surname}".strip()
+    url = f"https://api.openalex.org/works?search={urllib.parse.quote(q[:300])}&per-page=3"
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(url, headers={"User-Agent": UA}), timeout=10
+        ) as r:
+            items = json.loads(r.read()).get("results", [])
+    except Exception:
+        items = []
+
+    for item in items:
+        api_title = (item.get("title") or "").strip()
+        if not api_title or not _api_title_is_clean(api_title):
+            continue
+        sim, common = _title_similarity(title, api_title)
+        if sim < 0.70 or common < 3:
+            continue
+        year = item.get("publication_year")
+        if year and text_years and \
+           not any(abs(int(year) - int(ty)) <= 1 for ty in text_years):
+            continue
+        authorships = item.get("authorships", [])
+        fams = [(a.get("author", {}) or {}).get("display_name", "").split()[-1]
+                for a in authorships
+                if (a.get("author", {}) or {}).get("display_name")]
+        if fams and not any(_deaccent(f) in text_lower for f in fams):
+            continue
+        author_str = _openalex_format_authors(authorships)
+        log(f"OpenAlex confirmó el candidato (sim={sim:.2f})", TEXT_OK)
+        return _sanitize(f"{author_str} ({year or 's.f.'}) - {api_title}")
+
+    return None
+
+
+def _from_header(ruta: str, text: str, log):
+    """Extrae cabecera por tipografía y devuelve (verificado, directo).
+
+    - verificado: registro canónico de CrossRef/OpenAlex, o None
+    - directo:    nombre armado con la cabecera sola (sin confirmar), o None
+    """
+    info = header_mod.extract_header(ruta)
+    if info is None or info.is_scanned or not info.title:
+        return None, None
+
+    log(f"Cabecera por tipografía (pág. {info.page + 1}): "
+        f"{info.title[:60]}…" if len(info.title) > 60 else
+        f"Cabecera por tipografía (pág. {info.page + 1}): {info.title}",
+        TEXT_SEC)
+
+    first_surname = info.surnames[0] if info.surnames else ""
+    verified = _verify_via_apis(info.title, first_surname, text, log)
+
+    direct = None
+    if info.surnames and info.confidence == "high":
+        year = _extract_year_stream(text)
+        direct = _sanitize(
+            f"{_surnames_to_str(info.surnames)} ({year}) - {info.title}"
+        )
+    return verified, direct
+
+
+def _from_llm(ruta: str, text: str, log) -> str | None:
+    """Extracción por LLM (si hay backend configurado) + verificación en APIs.
+
+    Se acepta el resultado del LLM aunque las APIs no lo confirmen (p. ej.
+    revistas no indexadas): un modelo leyendo la página es más confiable que
+    las heurísticas por regex. La verificación, cuando existe, lo canoniza.
+    """
+    if not llm_extract.available():
+        return None
+
+    # Armar la entrada: líneas con tamaño de fuente de las primeras páginas
+    # con texto; si el documento es escaneado, mandar la página 1 como imagen.
+    header_text = ""
+    scanned = False
+    if THUMB_AVAILABLE:
+        try:
+            doc = fitz.open(ruta)
+            chunks = []
+            for pno in range(min(3, doc.page_count)):
+                lines = header_mod._page_lines(doc[pno])
+                if lines:
+                    chunks.append(f"--- página {pno + 1} ---")
+                    chunks.extend(f"[{s}] {t}" for s, _y, t in lines[:60])
+            scanned = not chunks
+            if scanned and llm_extract.backend() == "api":
+                pix = doc[0].get_pixmap(dpi=150)
+                png = pix.tobytes("png")
+                doc.close()
+                log("PDF escaneado: consultando LLM con la imagen de pág. 1…", TEXT_SEC)
+                data = llm_extract.extract_from_image(png)
+            else:
+                doc.close()
+                if scanned:
+                    return None
+                log("Consultando LLM…", TEXT_SEC)
+                data = llm_extract.extract_from_text("\n".join(chunks))
+        except Exception as e:
+            log(f"LLM falló: {e}", TEXT_WARN)
+            return None
+    else:
+        data = llm_extract.extract_from_text(text[:6000])
+
+    if not data or not data.get("title"):
+        return None
+
+    surnames = data.get("surnames", [])
+    title    = data["title"]
+    year     = data.get("year") or _extract_year_stream(text)
+
+    verified = _verify_via_apis(title, surnames[0] if surnames else "", text, log)
+    if verified:
+        return verified
+
+    log("LLM sin confirmación de APIs — se usa su lectura directa", TEXT_SEC)
+    return _sanitize(f"{_surnames_to_str(surnames)} ({year or 's.f.'}) - {title}")
+
+
 # ── Orquestador principal ──────────────────────────────────────────────────────
 
 def _finalize(result: str) -> str:
@@ -1269,29 +1480,30 @@ def _finalize(result: str) -> str:
 
 def get_new_name(reader: PyPDF2.PdfReader, ruta: str, log) -> str:
     """
-    Pipeline completo:
-      1. Metadata embebida del PDF       → más limpio, instantáneo
-      2. DOI → CrossRef                  → papers con DOI embebido
-      3a. CrossRef búsqueda por título   → papers sin DOI
-      3b. OpenAlex búsqueda por título   → cobertura de revistas regionales
-      3c. Semantic Scholar por título    → cobertura de ciencias
-      4. ISBN → Open Library             → libros
-      5. Heurísticas de texto            → último recurso
+    Pipeline completo (v2 — extracción consciente del layout):
+      1. DOI → CrossRef                  → papers con DOI embebido (infalible)
+      2. Cabecera tipográfica → APIs     → título por tamaño de fuente,
+                                            confirmado en CrossRef/OpenAlex
+      3. LLM (opcional) → APIs           → parser universal si hay backend
+      4. Metadata embebida del PDF       → validada (ebooks bien formados)
+      5. Búsqueda clásica por título     → CrossRef/OpenAlex/S2 con líneas
+      6. ISBN → Open Library             → libros
+      7. Cabecera tipográfica directa    → sin confirmación de API
+      8. Heurísticas de texto            → último recurso
     Todos los resultados pasan por _finalize() para normalización final.
     """
-    # 1. Metadata PDF
-    result = _from_pdf_metadata(reader, log)
-    if result:
-        log("Fuente: metadata del PDF", TEXT_OK)
-        return _finalize(result)
-
-    # Extraer texto (los demás pasos lo usan)
+    # Extraer texto (casi todos los pasos lo usan)
     text = _extract_text(reader, ruta, log)
     if len(text.strip()) < 10:
+        # Documento escaneado sin OCR: el LLM con visión es la última carta.
+        result = _from_llm(ruta, text, log)
+        if result:
+            log("Fuente: LLM (visión)", TEXT_OK)
+            return _finalize(result)
         log("No se pudo extraer texto de ninguna página.", TEXT_ERR)
         return "Documento sin texto"
 
-    # 2. DOI exacto → CrossRef
+    # 1. DOI exacto → CrossRef
     doi = _find_doi(text)
     if doi:
         log(f"DOI encontrado: {doi}", TEXT_SEC)
@@ -1301,28 +1513,46 @@ def get_new_name(reader: PyPDF2.PdfReader, ruta: str, log) -> str:
             return _finalize(result)
         log("CrossRef no respondió al DOI", TEXT_WARN)
 
-    # 3a. Búsqueda por título en CrossRef (fuzzy, 150M+ obras)
+    # 2. Cabecera por tipografía → verificación en APIs
+    header_verified, header_direct = _from_header(ruta, text, log)
+    if header_verified:
+        log("Fuente: cabecera tipográfica + API", TEXT_OK)
+        return _finalize(header_verified)
+
+    # 3. LLM opcional (lee la página como un humano; cualquier layout)
+    result = _from_llm(ruta, text, log)
+    if result:
+        log("Fuente: LLM", TEXT_OK)
+        return _finalize(result)
+
+    # 4. Metadata PDF (validada)
+    result = _from_pdf_metadata(reader, log)
+    if result:
+        log("Fuente: metadata del PDF", TEXT_OK)
+        return _finalize(result)
+
+    # 5a. Búsqueda por título en CrossRef (fuzzy, 150M+ obras)
     log("Buscando por título en CrossRef…", TEXT_SEC)
     result = _query_crossref_by_title(text, log)
     if result:
         log("Fuente: CrossRef (búsqueda por título)", TEXT_OK)
         return _finalize(result)
 
-    # 3b. OpenAlex (buena cobertura de revistas regionales/latinoamericanas)
+    # 5b. OpenAlex (buena cobertura de revistas regionales/latinoamericanas)
     log("Buscando en OpenAlex…", TEXT_SEC)
     result = _query_openalex_by_title(text, log)
     if result:
         log("Fuente: OpenAlex", TEXT_OK)
         return _finalize(result)
 
-    # 3c. Semantic Scholar
+    # 5c. Semantic Scholar
     log("Buscando en Semantic Scholar…", TEXT_SEC)
     result = _query_semantic_scholar_by_title(text, log)
     if result:
         log("Fuente: Semantic Scholar", TEXT_OK)
         return _finalize(result)
 
-    # 4. ISBN → Open Library
+    # 6. ISBN → Open Library
     isbn = _find_isbn(text)
     if isbn:
         log(f"ISBN encontrado: {isbn}", TEXT_SEC)
@@ -1332,7 +1562,12 @@ def get_new_name(reader: PyPDF2.PdfReader, ruta: str, log) -> str:
             return _finalize(result)
         log("Open Library no respondió", TEXT_WARN)
 
-    # 5. Heurísticas (último recurso)
+    # 7. Cabecera tipográfica sin confirmación de API (mejor que heurísticas)
+    if header_direct:
+        log("Fuente: cabecera tipográfica (sin confirmar)", TEXT_WARN)
+        return _finalize(header_direct)
+
+    # 8. Heurísticas (último recurso)
     log("Sin match en APIs — usando heurísticas", TEXT_WARN)
     return _finalize(_heuristic_name(text))
 
