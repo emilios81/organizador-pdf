@@ -358,22 +358,57 @@ class Api:
             return {"saved": False, "error": str(e)}
 
     def save_all(self) -> dict:
-        """Recorre los pendientes y abre un Save dialog por cada uno."""
-        pending = [e.id for e in self.files.values() if e.name and not e.saved and not e.error]
+        """Guardado en lote: se elige UNA carpeta destino y se copian todos
+        los pendientes de una vez (sin un diálogo por archivo)."""
+        pending = [e for e in self.files.values() if e.name and not e.saved and not e.error]
         if not pending:
             return {"saved": 0, "total": 0}
+        if self._window is None:
+            return {"saved": 0, "total": len(pending), "error": "Sin ventana"}
 
-        self._emit("log", {"level": "info", "msg": f"Guardando {len(pending)} archivo(s)…"})
+        result = self._window.create_file_dialog(
+            webview.FOLDER_DIALOG,
+            directory=os.path.dirname(pending[0].path),
+        )
+        if not result:
+            return {"saved": 0, "total": len(pending), "cancelled": True}
+        dest_dir = result if isinstance(result, str) else result[0]
+
+        self._emit("log", {
+            "level": "info",
+            "msg":   f"Guardando {len(pending)} archivo(s) en {dest_dir}…",
+        })
+
         saved = 0
-        for fid in pending:
-            r = self.save_one(fid)
-            if r.get("saved"):
+        for entry in pending:
+            nombre = entry.name.strip()
+            if not nombre.lower().endswith(".pdf"):
+                nombre += ".pdf"
+            dest = os.path.join(dest_dir, nombre)
+            # Colisiones (otro archivo del lote o uno preexistente con el
+            # mismo nombre): sufijo ' (2)', ' (3)', …
+            base, ext = os.path.splitext(dest)
+            n = 2
+            while os.path.exists(dest):
+                dest = f"{base} ({n}){ext}"
+                n += 1
+            try:
+                shutil.copy2(entry.path, dest)
+                entry.saved = True
                 saved += 1
-                self._emit("progress", {"id": fid, "status": "saved"})
-            elif r.get("cancelled"):
-                # El usuario canceló este — paramos para no acosarlo.
-                break
-        return {"saved": saved, "total": len(pending)}
+                self._emit("progress", {"id": entry.id, "status": "saved"})
+                self._emit("log", {"level": "ok", "msg": f"✓ {os.path.basename(dest)}"})
+            except Exception as e:
+                self._emit("log", {
+                    "level": "err",
+                    "msg":   f"Error guardando {entry.orig}: {e}",
+                })
+
+        self._emit("log", {
+            "level": "ok" if saved == len(pending) else "warn",
+            "msg":   f"Guardado en lote: {saved}/{len(pending)} archivo(s).",
+        })
+        return {"saved": saved, "total": len(pending), "dest": dest_dir}
 
     def remove_file(self, file_id: int) -> bool:
         fid = int(file_id)

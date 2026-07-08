@@ -468,9 +468,11 @@ function App() {
     setErrorIds((p) => { const n = new Set(p); newItems.forEach((x) => n.delete(x.id)); return n; });
   };
 
+  // El estado "guardado" de cada archivo llega por eventos progress
+  // individuales del backend — no marcar nada en bloque acá, o archivos
+  // que fallaron figurarían como guardados.
   const saveAll = async () => {
-    const r = await call('save_all');
-    if (r && r.saved) setFiles((prev) => prev.map((f) => f.saved || (!f.error && f.name) ? { ...f, saved: true } : f));
+    await call('save_all');
   };
 
   const clear = async () => {
