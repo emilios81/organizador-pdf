@@ -120,7 +120,38 @@ def _is_noise_line(txt: str) -> bool:
     if re.search(r'\b\d{1,3}\s*[\(:]\s*\d', txt) and \
        re.search(r'\d+\s*[-–]\s*\d+', txt):
         return True
+    # Encabezado corrido de revista: 'COMECHINGONIA 29 (3)'
+    if re.search(r'\b\d{1,3}\s*\(\d{1,3}\)', txt):
+        return True
     return False
+
+
+# Palabras que no inician un nombre de persona (evita que 'El Depósito' o
+# 'La Zaranda' matcheen como nombre propio).
+_NOT_NAME_STARTERS = {
+    "el", "la", "los", "las", "un", "una", "unos", "unas",
+    "de", "del", "al", "en", "y", "the", "a", "an", "of", "in",
+}
+
+
+def _looks_like_person_line(txt: str) -> bool:
+    """Línea de autores en caja mixta ('Víctor Sierpe1, Cristóbal Palacios2').
+
+    A diferencia de `_looks_like_authors`, exige nombres en mixto (NO acepta
+    versales) y una línea corta, porque se usa como ANCLA para distinguir
+    título de autores en layouts donde el título va en ALL-CAPS al mismo
+    cuerpo que el texto.
+    """
+    if len(txt) < 5 or len(txt) > 120 or len(txt.split()) > 8:
+        return False
+    if '@' in txt or _AFFILIATION_RE.search(txt) or _NOISE_RE.search(txt):
+        return False
+    if _caps_ratio(txt) > 0.6:
+        return False
+    m = _NAME_RE.search(txt)
+    if not m:
+        return False
+    return m.group(0).split()[0].lower() not in _NOT_NAME_STARTERS
 
 
 def _looks_like_authors(txt: str) -> bool:
@@ -164,6 +195,30 @@ def _surnames_from_line(txt: str) -> list:
     return out
 
 
+def _caps_ratio(txt: str) -> float:
+    """Proporción de letras en mayúscula (para detectar títulos ALL-CAPS)."""
+    letters = [c for c in txt if c.isalpha()]
+    if not letters:
+        return 0.0
+    return sum(1 for c in letters if c.isupper()) / len(letters)
+
+
+def _first_group_by_gap(cands: list, size: float) -> list:
+    """Agrupa líneas candidatas consecutivas cortando en huecos verticales
+    anómalos (> 2× el espaciado interno observado). Evita pegar el título
+    con su traducción al inglés, que suele venir a doble espacio."""
+    group, gaps = [], []
+    for y, t in cands:
+        if group:
+            gap = y - group[-1][0]
+            typical = min(gaps) if gaps else size * 1.6
+            if gap > max(typical * 1.8, size * 1.6):
+                break
+            gaps.append(gap)
+        group.append((y, t))
+    return group
+
+
 def _header_from_page(page, pno: int) -> HeaderInfo | None:
     lines = _page_lines(page)
     if not lines:
@@ -176,55 +231,85 @@ def _header_from_page(page, pno: int) -> HeaderInfo | None:
     if _CREDITS_PAGE_RE.search(page_text):
         return None
 
-    # Candidatas a título: líneas con fuente claramente mayor al cuerpo,
-    # que no sean ruido. Se agrupan las consecutivas del MISMO tamaño.
+    # ── Candidatas a título, dos señales en orden de fuerza ─────────────────
+    # (a) tipografía: líneas con fuente mayor al cuerpo
     big = [(s, y, t) for s, y, t in lines
-           if s >= body * 1.25 and s >= body + 1.5 and not _is_noise_line(t)]
-    if not big:
+           if s >= body * 1.15 and s >= body + 1.2 and not _is_noise_line(t)]
+
+    group, max_size = [], body
+    if big:
+        # Grupo de líneas consecutivas con el tamaño MÁXIMO (tolerancia 0.5pt)
+        max_size = max(s for s, _y, _t in big)
+        cands = [(y, t) for s, y, t in big if abs(s - max_size) <= 0.5]
+        group = _first_group_by_gap(cands, max_size)
+
+    if not group:
+        # (b) fallback: título en ALL-CAPS al mismo cuerpo que el texto.
+        # Un título en versales es indistinguible de una línea de autores por
+        # patrón, así que primero se ancla la línea de autores (en caja mixta,
+        # que SÍ es distinguible) y el título es el bloque de versales
+        # inmediatamente ANTERIOR a esa ancla.
+        anchor_y = None
+        for s, y, t in lines:
+            # Los autores nunca van en fuente menor que el cuerpo del texto
+            # (los encabezados de evento/revista sí suelen ir más chicos).
+            if s >= body - 0.1 and _looks_like_person_line(t):
+                anchor_y = y
+                break
+        if anchor_y is not None:
+            cands = [(y, t) for s, y, t in lines
+                     if y < anchor_y and len(t) >= 12
+                     and _caps_ratio(t) >= 0.7 and not _is_noise_line(t)]
+            group = _first_group_by_gap(cands, body)
+
+    if not group:
         return None
 
-    # El título es el grupo de líneas consecutivas con el tamaño MÁXIMO
-    # entre las candidatas (con tolerancia 0.5pt).
-    max_size = max(s for s, _y, _t in big)
-    group, last_y = [], None
-    for s, y, t in big:
-        if abs(s - max_size) > 0.5:
-            continue
-        if last_y is not None and y - last_y > max_size * 3.5:
-            # Hueco vertical grande: quedarse con el primer grupo
-            break
-        group.append((y, t))
-        last_y = y
-    title = " ".join(t for _y, t in group).strip()
-    title = re.sub(r'\s+', ' ', title)
+    title = re.sub(r'\s+', ' ', " ".join(t for _y, t in group)).strip()
     if len(title) < 12 or len(title.split()) < 3:
         return None
     title_top = group[0][0]
     title_bottom = group[-1][0]
 
-    # Autores: primera línea "con nombres" DESPUÉS del título (lo usual),
-    # si no, la última ANTES (algunas revistas ponen autores arriba).
-    authors_line = ""
-    for s, y, t in lines:
-        if y <= title_bottom or s > max_size - 0.5:
-            continue
-        if _looks_like_authors(t):
-            authors_line = t
+    # ── Autores: líneas "con nombres" DESPUÉS del título (lo usual) ─────────
+    # Se juntan las consecutivas (cada autor suele ir en su propia línea).
+    # Dos pasadas: primero caja mixta (señal fuerte, salta el título traducido
+    # en versales); si no hay, versales (portadas tipo 'SVEND AAGE BUUS').
+    authors_parts = []
+    for matcher in (_looks_like_person_line, _looks_like_authors):
+        last_y = None
+        for s, y, t in lines:
+            if y <= title_bottom or s > max_size + 0.5:
+                continue
+            if authors_parts and (y - last_y) > max(s, body) * 2.5:
+                break
+            if matcher(t):
+                authors_parts.append(t)
+                last_y = y
+            elif authors_parts:
+                break
+        if authors_parts:
             break
-    if not authors_line:
+    if not authors_parts:
+        # Algunas revistas ponen los autores ARRIBA del título.
         for s, y, t in reversed(lines):
             if y >= title_top:
                 continue
             if _looks_like_authors(t):
-                authors_line = t
+                authors_parts.append(t)
                 break
+    authors_line = ", ".join(authors_parts)
 
     surnames = _surnames_from_line(authors_line) if authors_line else []
 
-    # Confianza: alta si hay título por fuente Y autores con nombre propio.
-    # La presencia de marcadores de artículo (Resumen/Abstract) refuerza.
+    # ── Confianza ────────────────────────────────────────────────────────────
+    # Alta si hay autores con nombre propio Y la página parece cabecera de
+    # artículo (marcador Resumen/Abstract), primera página, o una portada de
+    # libro (pocas líneas, tipografía grande).
     has_marker = bool(_ARTICLE_MARKER_RE.search(page_text))
-    confidence = "high" if (surnames and (has_marker or pno == 0)) else "low"
+    is_title_page = len(lines) <= 15
+    confidence = "high" if (surnames and (has_marker or pno == 0 or is_title_page)) \
+                 else "low"
 
     return HeaderInfo(
         title=title,

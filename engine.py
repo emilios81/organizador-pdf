@@ -147,8 +147,10 @@ def _metadata_looks_valid(title: str, author: str) -> bool:
         return False
 
     # ── Título: demasiado corto para ser un título académico real ────────────
-    # (placeholders tipo 'Mesa temática –' pasan los filtros anteriores)
-    if len(title.split()) < 3 and len(title) < 25:
+    # (placeholders tipo 'Mesa temática –' pasan los filtros anteriores).
+    # Se cuentan solo tokens con letras: guiones/números sueltos no son palabras.
+    words = [w for w in title.split() if re.search(r'[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]', w)]
+    if len(words) < 3 and len(title) < 25:
         return False
 
     return True
