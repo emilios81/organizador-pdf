@@ -54,6 +54,20 @@ def _color_to_level(color: str) -> str:
     return _LEVEL_MAP.get(color, "info")
 
 
+def _clip_filename(dest_dir: str, nombre: str) -> str:
+    """Recorta `nombre` para que la ruta completa no supere el MAX_PATH de
+    Windows (~260 chars) — si no, la copia falla silenciosamente con títulos
+    muy largos. Deja margen para un posible sufijo ' (n)'."""
+    max_name = 250 - len(dest_dir) - 8
+    if max_name < 40:
+        max_name = 40
+    if len(nombre) <= max_name:
+        return nombre
+    stem, ext = os.path.splitext(nombre)
+    stem = stem[:max_name - len(ext) - 1].rstrip(" .,;:-–")
+    return f"{stem}…{ext}"
+
+
 class FileEntry:
     """Estado de un PDF en cola."""
 
@@ -102,6 +116,7 @@ class Api:
         self._next_id = 1
         self._lock    = threading.Lock()
         self._busy    = False
+        self._saving  = False   # candado del guardado en lote
 
     # ── Setup desde el launcher (no expuesto a JS) ─────────────────────────
     def _attach_window(self, window: webview.Window) -> None:
@@ -274,6 +289,20 @@ class Api:
                     raise ValueError("PDF sin páginas.")
                 new_name = get_new_name(reader, entry.path, log)
 
+            # Extracción totalmente fallida → proponer el nombre ORIGINAL.
+            # Si varios archivos fallidos comparten el placeholder, al
+            # guardarlos colisionan como 'Documento sin texto (2).pdf' y
+            # parecen duplicados sin serlo.
+            failed = (
+                new_name == "Documento sin texto"
+                or (new_name.startswith("Anónimo") and "Sin título" in new_name)
+            )
+            if failed:
+                stem = os.path.splitext(entry.orig)[0]
+                new_name = f"{stem} (sin identificar)"
+                log("No se pudo identificar: se propone el nombre original.",
+                    engine.TEXT_WARN)
+
             entry.name = new_name
             entry.src  = src_holder["value"] or "heurística"
 
@@ -357,6 +386,7 @@ class Api:
             return {"saved": False, "error": "Nombre vacío"}
         if not nombre.lower().endswith(".pdf"):
             nombre += ".pdf"
+        nombre = _clip_filename(os.path.dirname(entry.path), nombre)
 
         result = self._window.create_file_dialog(
             webview.SAVE_DIALOG,
@@ -380,6 +410,20 @@ class Api:
     def save_all(self) -> dict:
         """Guardado en lote: se elige UNA carpeta destino y se copian todos
         los pendientes de una vez (sin un diálogo por archivo)."""
+        # Cada llamada JS corre en su propio hilo: un doble clic dispararía
+        # DOS guardados concurrentes que copiarían todo dos veces.
+        with self._lock:
+            if self._saving:
+                self._emit("log", {"level": "warn",
+                                   "msg": "Ya hay un guardado en curso."})
+                return {"saved": 0, "total": 0, "busy": True}
+            self._saving = True
+        try:
+            return self._save_all_locked()
+        finally:
+            self._saving = False
+
+    def _save_all_locked(self) -> dict:
         pending = [e for e in self.files.values() if e.name and not e.saved and not e.error]
         if not pending:
             return {"saved": 0, "total": 0}
@@ -404,6 +448,7 @@ class Api:
             nombre = entry.name.strip()
             if not nombre.lower().endswith(".pdf"):
                 nombre += ".pdf"
+            nombre = _clip_filename(dest_dir, nombre)
             dest = os.path.join(dest_dir, nombre)
             # Colisiones (otro archivo del lote o uno preexistente con el
             # mismo nombre): sufijo ' (2)', ' (3)', …
