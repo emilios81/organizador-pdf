@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "Si usás este software en tu investigación, citalo así."
+type: software
+title: "Nomenclador Académico (PDF Scholar)"
+abstract: >-
+  Herramienta de escritorio que renombra automáticamente PDFs académicos al
+  formato «Autor (Año) - Título», combinando la extracción de DOI y metadata
+  del documento, el análisis tipográfico de la cabecera y la verificación
+  contra CrossRef, OpenAlex, Semantic Scholar y Open Library.
+authors:
+  - family-names: Villafañez
+    given-names: Emilio A.
+    affiliation: "Escuela de Arqueología, Universidad Nacional de Catamarca — CONICET — Fundación Azara"
+repository-code: "https://github.com/emilios81/organizador-pdf"
+license: MIT
+version: "3.0"
+date-released: "2026-07-25"
+keywords:
+  - gestión bibliográfica
+  - metadatos
+  - PDF
+  - CrossRef
+  - OpenAlex
+  - humanidades digitales
+  - arqueología

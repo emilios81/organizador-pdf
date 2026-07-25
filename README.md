@@ -108,6 +108,22 @@ pyinstaller "PDF Scholar.spec"
 
 El binario queda en `dist/PDF Scholar/`.
 
+## Licencia
+
+MIT — ver [LICENSE](LICENSE). Podés usarlo, modificarlo y redistribuirlo
+libremente conservando el aviso de copyright.
+
+Una aclaración sobre las dependencias: **PyMuPDF es AGPL-3.0**. Instalada por
+separado con `pip`, como acá, no afecta la licencia de este código. Pero si
+generás el ejecutable con PyInstaller, el bundle resultante incluye PyMuPDF y
+queda alcanzado por la AGPL: no lo redistribuyas sin tener eso en cuenta.
+
+## Citación
+
+Si lo usás en tu investigación, hay un [CITATION.cff](CITATION.cff) en la raíz:
+GitHub muestra un botón *Cite this repository* que genera la referencia en
+BibTeX y APA.
+
 ---
 
 Desarrollado en el marco del **LATDAA** (Laboratorio de Tecnologías Digitales
