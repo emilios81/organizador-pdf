@@ -48,10 +48,37 @@ pip install -r requirements.txt
 
 Dependencias externas, ambas opcionales:
 
-- **Tesseract OCR** — habilita el reconocimiento de PDFs escaneados.
-  [Instalador para Windows](https://github.com/UB-Mannheim/tesseract/wiki)
 - **WebView2 Runtime** — el motor de la ventana. Ya viene con Windows 11 y con
   las versiones recientes de Windows 10.
+- **Tesseract OCR** — habilita el reconocimiento de PDFs escaneados.
+
+### Tesseract, con sus dos vueltas de rosca
+
+En Windows:
+
+```bash
+winget install UB-Mannheim.TesseractOCR
+```
+
+Dos cosas que la instalación silenciosa **no** deja resueltas:
+
+1. **No agrega Tesseract al PATH.** El programa no depende de eso: busca el
+   ejecutable en las rutas de instalación habituales (`_find_tesseract()` en
+   `engine.py`).
+2. **Instala solo inglés.** Como acá se procesa bibliografía en castellano,
+   conviene sumar el idioma español. `Program Files` no admite escritura sin
+   privilegios de administrador, así que el programa también busca los idiomas
+   en carpetas del perfil del usuario (`_find_tessdata()`), en este orden:
+   `TESSDATA_PREFIX`, `%USERPROFILE%\Tesseract-OCR\tessdata`,
+   `%LOCALAPPDATA%\Tesseract-OCR\tessdata`, `~/.tesseract/tessdata`.
+
+Para dejar el español disponible sin permisos de administrador, copiar ahí los
+`.traineddata` que ya trae la instalación y agregar
+[`spa.traineddata`](https://github.com/tesseract-ocr/tessdata_fast) del
+repositorio oficial de Tesseract.
+
+Si falta algún idioma, no falla: el programa consulta qué hay instalado y arma
+la lista con eso. Pedirle a Tesseract un idioma ausente aborta el OCR entero.
 
 Hace falta conexión a internet: el pipeline consulta CrossRef, OpenAlex,
 Semantic Scholar y Open Library, y la interfaz carga React desde CDN.

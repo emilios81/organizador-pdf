@@ -34,12 +34,78 @@ except ImportError:
     fitz = Image = None
     THUMB_AVAILABLE = False
 
+def _find_tesseract() -> str | None:
+    """Ubica el ejecutable de Tesseract: primero el PATH, después las rutas de
+    instalación habituales.
+
+    El instalador de Windows no agrega Tesseract al PATH salvo que se tilde la
+    opción, así que buscarlo a mano evita un falso "no está instalado".
+    """
+    encontrado = shutil.which("tesseract")
+    if encontrado:
+        return encontrado
+    candidatos = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                     "Programs", "Tesseract-OCR", "tesseract.exe"),
+        "/usr/bin/tesseract",
+        "/usr/local/bin/tesseract",
+        "/opt/homebrew/bin/tesseract",
+    ]
+    for c in candidatos:
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
+def _find_tessdata() -> str | None:
+    """Directorio de idiomas alternativo al del sistema.
+
+    Tesseract se instala en Program Files, donde un usuario sin privilegios de
+    administrador no puede agregar idiomas. Si hay una copia en el perfil del
+    usuario se prefiere esa, que sí es ampliable.
+    """
+    candidatos = [
+        os.environ.get("TESSDATA_PREFIX", ""),
+        # `USERPROFILE` va antes que `LOCALAPPDATA` a propósito: el Python de
+        # Microsoft Store virtualiza AppData\Local, así que una carpeta creada
+        # ahí por otro proceso le resulta invisible.
+        os.path.join(os.environ.get("USERPROFILE", ""),
+                     "Tesseract-OCR", "tessdata"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                     "Tesseract-OCR", "tessdata"),
+        os.path.join(os.path.expanduser("~"), ".tesseract", "tessdata"),
+    ]
+    for d in candidatos:
+        if d and os.path.isdir(d) and any(
+            f.endswith(".traineddata") for f in os.listdir(d)
+        ):
+            return d
+    return None
+
+
+OCR_LANG = "eng"   # se ajusta abajo a los idiomas realmente instalados
+
 try:
     import pytesseract
+    _exe = _find_tesseract()
+    if _exe:
+        pytesseract.pytesseract.tesseract_cmd = _exe
+    _tessdata = _find_tessdata()
+    if _tessdata:
+        # Se apunta por variable de entorno y no por `--tessdata-dir`: pytesseract
+        # trocea el `config` sin quitar las comillas, así que una ruta entrecomillada
+        # le llega a Tesseract con las comillas adentro y no encuentra los idiomas.
+        os.environ["TESSDATA_PREFIX"] = _tessdata
     # El paquete de Python es solo un envoltorio: sin el binario de Tesseract
     # instalado no hay OCR. Se verifica acá para no anunciar en la interfaz una
     # capacidad que después falla archivo por archivo.
     pytesseract.get_tesseract_version()
+    # Pedir un idioma que no está instalado hace fallar el OCR entero, así que
+    # se arma la lista con lo que efectivamente hay.
+    _langs = set(pytesseract.get_languages())
+    OCR_LANG = "+".join(l for l in ("spa", "eng") if l in _langs) or "eng"
     OCR_AVAILABLE = THUMB_AVAILABLE
 except Exception:
     OCR_AVAILABLE = False
@@ -230,7 +296,7 @@ def _extract_text(reader: PyPDF2.PdfReader, ruta: str, log) -> str:
                 try:
                     pix = doc_fitz[i].get_pixmap(dpi=200)
                     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    page_text = pytesseract.image_to_string(img, lang="spa+eng")
+                    page_text = pytesseract.image_to_string(img, lang=OCR_LANG)
                     log(f"Pág. {i+1}: OCR completado", TEXT_OK)
                 except Exception as e:
                     log(f"OCR falló en pág. {i+1}: {e}", TEXT_WARN)
