@@ -36,8 +36,12 @@ except ImportError:
 
 try:
     import pytesseract
+    # El paquete de Python es solo un envoltorio: sin el binario de Tesseract
+    # instalado no hay OCR. Se verifica acá para no anunciar en la interfaz una
+    # capacidad que después falla archivo por archivo.
+    pytesseract.get_tesseract_version()
     OCR_AVAILABLE = THUMB_AVAILABLE
-except ImportError:
+except Exception:
     OCR_AVAILABLE = False
 
 # ── Configuración ──────────────────────────────────────────────────────────────
