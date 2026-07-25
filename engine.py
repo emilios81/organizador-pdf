@@ -1,4 +1,4 @@
-"""Motor de renombrado de PDF Scholar (sin GUI).
+﻿"""Motor de renombrado de PDF Scholar (sin GUI).
 
 Pipeline: metadata PDF -> DOI/CrossRef -> CrossRef(titulo) -> OpenAlex ->
           Semantic Scholar -> ISBN/Open Library -> OCR -> heuristicas
@@ -351,12 +351,99 @@ def _split_glued_words(s: str) -> str:
     return re.sub(r'([a-záéíóúüñ])([A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ])', r'\1 \2', s)
 
 
-def _smart_title_case(s: str) -> str:
+_PROPER_TOKEN_RE = re.compile(
+    r"[A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]{2,}(?:['\-][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)?"
+)
+# Secuencias de 2 a 3 palabras capitalizadas seguidas: "La Rioja",
+# "Campo del Arenal", "Antofagasta de la Sierra".
+_PROPER_PHRASE_RE = re.compile(
+    r"[A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]+){1,2}"
+)
+_SENTENCE_END = ".!?¡¿:;•\n\r|"
+
+
+def _starts_sentence(sample: str, pos: int) -> bool:
+    """¿La posición `pos` arranca oración? Ahí la mayúscula no prueba nada."""
+    i = pos - 1
+    while i >= 0 and sample[i] in " \t":
+        i -= 1
+    return i < 0 or sample[i] in _SENTENCE_END
+
+
+def _proper_nouns_from(text: str) -> tuple[dict[str, str], list[str]]:
+    """
+    Extrae del cuerpo del documento los nombres propios, para poder
+    restaurarlos en títulos ALL-CAPS (donde la mayúscula original se perdió
+    y no hay forma de deducirla del propio título).
+
+    Criterio: una palabra cuenta como nombre propio si el cuerpo la escribe
+    con mayúscula inicial FUERA de comienzo de oración y NUNCA en minúscula.
+    Así "Bruch" o "Ambato" entran, pero "Este" o "Durante" —que arrancan
+    oraciones pero también aparecen en minúscula— quedan afuera.
+
+    Para topónimos de varias palabras ("La Rioja") el criterio por palabra no
+    alcanza, porque "la" aparece en minúscula por todos lados. Ahí se exige
+    que la secuencia completa aparezca capitalizada fuera de comienzo de
+    oración y que nunca aparezca toda en minúscula.
+
+    Devuelve ({forma_minúscula: forma_capitalizada}, [frases capitalizadas]).
+    """
+    if not text:
+        return {}, []
+    sample = text[:60000]
+    lowered = sample.lower()
+    # Palabras que en algún lado aparecen en minúscula: no son nombres propios.
+    lowered_seen = set(re.findall(r"[a-záéíóúüñ]{3,}", sample))
+
+    proper: dict[str, str] = {}
+    for m in _PROPER_TOKEN_RE.finditer(sample):
+        tok = m.group(0)
+        key = tok.lower()
+        if key in lowered_seen or key in proper:
+            continue
+        if _starts_sentence(sample, m.start()):
+            continue
+        proper[key] = tok
+
+    phrases: dict[str, str] = {}
+    for m in _PROPER_PHRASE_RE.finditer(sample):
+        frase, inicio = m.group(0), m.start()
+        # Si la secuencia arranca oración, descartar su primera palabra:
+        # en "…equipos. En La Rioja" lo que vale es "La Rioja", no "En La Rioja".
+        if _starts_sentence(sample, inicio):
+            partes = frase.split(None, 1)
+            if len(partes) < 2 or " " not in partes[1]:
+                if len(partes) < 2:
+                    continue
+            frase = partes[1]
+            if " " not in frase:
+                continue
+        key = frase.lower()
+        if key not in phrases:
+            phrases[key] = frase
+
+    # Una frase vale solo si el cuerpo la escribe SIEMPRE capitalizada: si
+    # aparece con otra caja en algún lado, la evidencia es ambigua y se descarta.
+    validas = [
+        frase for key, frase in phrases.items()
+        if lowered.count(key) == sample.count(frase)
+    ]
+    # Más largas primero, para que "Antofagasta de la Sierra" gane sobre "la Sierra".
+    validas.sort(key=len, reverse=True)
+    return proper, validas
+
+
+def _smart_title_case(s: str, body_text: str | None = None) -> str:
     """
     Convierte un título ALL-CAPS o Mezclado a forma legible:
       "TEMPRANA COMPLEJIDAD FUNERARIA EN LA COSTA" →
       "Temprana complejidad funeraria en la costa"
     No toca si ya tiene una proporción razonable de minúsculas (>30%).
+
+    Si se pasa `body_text` (el texto del PDF), se usan sus nombres propios
+    para restaurar las mayúsculas que el título en ALL-CAPS había perdido:
+      "OCUPACIONES TEMPRANAS EN LA RIOJA" →
+      "Ocupaciones tempranas en La Rioja"   (y no "la rioja")
     """
     if not s:
         return s
@@ -376,6 +463,25 @@ def _smart_title_case(s: str) -> str:
     # Después de ". " o ": " también
     result = re.sub(r'([\.\:]\s+)([a-záéíóúüñ])',
                     lambda m: m.group(1) + m.group(2).upper(), result)
+
+    # Restaurar nombres propios usando el cuerpo del documento como referencia.
+    if not body_text:
+        return result
+    proper, phrases = _proper_nouns_from(body_text)
+    # Primero las frases (más largas antes), después las palabras sueltas.
+    for frase in phrases:
+        result = re.sub(
+            r"\b" + re.escape(frase) + r"\b",
+            frase,
+            result,
+            flags=re.IGNORECASE,
+        )
+    if proper:
+        result = re.sub(
+            r"\b[a-záéíóúüñ]{3,}\b",
+            lambda m: proper.get(m.group(0), m.group(0)),
+            result,
+        )
     return result
 
 
@@ -1456,11 +1562,14 @@ def _from_llm(ruta: str, text: str, log) -> str | None:
 
 # ── Orquestador principal ──────────────────────────────────────────────────────
 
-def _finalize(result: str) -> str:
+def _finalize(result: str, body_text: str | None = None) -> str:
     """
     Post-procesador GENERAL que corre sobre CUALQUIER resultado del pipeline.
     Normaliza: aplica title-case a títulos ALL-CAPS, colapsa espacios, trunca
     si es absurdamente largo, y resanitiza.
+
+    `body_text` es el texto del PDF; sirve para restaurar los nombres propios
+    de los títulos que venían en ALL-CAPS.
     """
     if not result:
         return result
@@ -1468,15 +1577,19 @@ def _finalize(result: str) -> str:
     if not m:
         return _sanitize(result)
     autor, year, titulo = m.group(1), m.group(2), m.group(3)
-    titulo = _smart_title_case(titulo).strip()
     # Si el "título" es absurdamente largo (>240 chars) cortarlo en la primera
     # oración o signo fuerte, para no generar nombres de archivo monstruosos.
+    # El recorte va ANTES del title-case: la caja hay que decidirla sobre lo que
+    # realmente termina en el nombre del archivo. Si no, un título larguísimo en
+    # caja mixta (típico de un índice de revista mal extraído) se deja intacto
+    # por su promedio, y el recorte deja a la vista un membrete ALL-CAPS.
     if len(titulo) > 240:
         cut = re.search(r'[\.;:]\s+', titulo[:240])
         if cut:
             titulo = titulo[:cut.start()].strip()
         else:
             titulo = titulo[:240].rstrip() + "…"
+    titulo = _smart_title_case(titulo, body_text).strip()
     return _sanitize(f"{autor} ({year}) - {titulo}")
 
 
@@ -1501,7 +1614,7 @@ def get_new_name(reader: PyPDF2.PdfReader, ruta: str, log) -> str:
         result = _from_llm(ruta, text, log)
         if result:
             log("Fuente: LLM (visión)", TEXT_OK)
-            return _finalize(result)
+            return _finalize(result, text)
         log("No se pudo extraer texto de ninguna página.", TEXT_ERR)
         return "Documento sin texto"
 
@@ -1512,47 +1625,47 @@ def get_new_name(reader: PyPDF2.PdfReader, ruta: str, log) -> str:
         result = _query_crossref(doi)
         if result:
             log("Fuente: CrossRef (DOI)", TEXT_OK)
-            return _finalize(result)
+            return _finalize(result, text)
         log("CrossRef no respondió al DOI", TEXT_WARN)
 
     # 2. Cabecera por tipografía → verificación en APIs
     header_verified, header_direct = _from_header(ruta, text, log)
     if header_verified:
         log("Fuente: cabecera tipográfica + API", TEXT_OK)
-        return _finalize(header_verified)
+        return _finalize(header_verified, text)
 
     # 3. LLM opcional (lee la página como un humano; cualquier layout)
     result = _from_llm(ruta, text, log)
     if result:
         log("Fuente: LLM", TEXT_OK)
-        return _finalize(result)
+        return _finalize(result, text)
 
     # 4. Metadata PDF (validada)
     result = _from_pdf_metadata(reader, log)
     if result:
         log("Fuente: metadata del PDF", TEXT_OK)
-        return _finalize(result)
+        return _finalize(result, text)
 
     # 5a. Búsqueda por título en CrossRef (fuzzy, 150M+ obras)
     log("Buscando por título en CrossRef…", TEXT_SEC)
     result = _query_crossref_by_title(text, log)
     if result:
         log("Fuente: CrossRef (búsqueda por título)", TEXT_OK)
-        return _finalize(result)
+        return _finalize(result, text)
 
     # 5b. OpenAlex (buena cobertura de revistas regionales/latinoamericanas)
     log("Buscando en OpenAlex…", TEXT_SEC)
     result = _query_openalex_by_title(text, log)
     if result:
         log("Fuente: OpenAlex", TEXT_OK)
-        return _finalize(result)
+        return _finalize(result, text)
 
     # 5c. Semantic Scholar
     log("Buscando en Semantic Scholar…", TEXT_SEC)
     result = _query_semantic_scholar_by_title(text, log)
     if result:
         log("Fuente: Semantic Scholar", TEXT_OK)
-        return _finalize(result)
+        return _finalize(result, text)
 
     # 6. ISBN → Open Library
     isbn = _find_isbn(text)
@@ -1561,17 +1674,17 @@ def get_new_name(reader: PyPDF2.PdfReader, ruta: str, log) -> str:
         result = _query_open_library(isbn)
         if result:
             log("Fuente: Open Library (libros)", TEXT_OK)
-            return _finalize(result)
+            return _finalize(result, text)
         log("Open Library no respondió", TEXT_WARN)
 
     # 7. Cabecera tipográfica sin confirmación de API (mejor que heurísticas)
     if header_direct:
         log("Fuente: cabecera tipográfica (sin confirmar)", TEXT_WARN)
-        return _finalize(header_direct)
+        return _finalize(header_direct, text)
 
     # 8. Heurísticas (último recurso)
     log("Sin match en APIs — usando heurísticas", TEXT_WARN)
-    return _finalize(_heuristic_name(text))
+    return _finalize(_heuristic_name(text), text)
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
