@@ -1,0 +1,11 @@
+# Interfaz (ventana nativa con WebView2 en Windows)
+pywebview
+
+# Lectura de PDFs
+PyPDF2
+
+# Miniaturas, render de páginas y OCR (opcionales pero recomendados)
+PyMuPDF
+Pillow
+pytesseract
+numpy
